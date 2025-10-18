@@ -71,8 +71,19 @@ class Checkpoint(pygame.sprite.Sprite):
         super().__init__()
         self.image = pygame.Surface((20, 40), pygame.SRCALPHA)
         self.rect = self.image.get_rect(midbottom=(x, ground_y))
-        pygame.draw.rect(self.image, (0, 255, 0), (0, 0, 20, 40))  # Green pole
         self.x = x
+        self.activated = False  # Track if checkpoint is triggered
+        self.draw()
+
+    def draw(self):
+        color = (255, 255, 0) if self.activated else (0, 255, 0)  # Yellow when activated, green otherwise
+        self.image.fill((0, 0, 0, 0))  # Clear surface
+        pygame.draw.rect(self.image, color, (0, 0, 20, 40))  # Draw pole
+
+    def activate(self):
+        if not self.activated:
+            self.activated = True
+            self.draw()
 
 class Flag(pygame.sprite.Sprite):
     def __init__(self, x, ground_y):
@@ -272,7 +283,7 @@ def initial_platforms():
 
 
 def gen_platforms_for_range(platforms, existing_xs, start_x, end_x, player_x):
-    CHUNK_W = 300
+    CHUNK_W = 700 # Increased from 500 to 700 for wider horizontal spacing
     cx_start = start_x // CHUNK_W
     cx_end = end_x // CHUNK_W
     last_y = HEIGHT - 140  # Track last platform y for reachability
@@ -282,23 +293,33 @@ def gen_platforms_for_range(platforms, existing_xs, start_x, end_x, player_x):
             continue
         existing_xs.add(cx)
         base_x = cx * CHUNK_W + 200
-        for i in range(random.randint(1, 3)):
+        for i in range(random.randint(5,10)): # 0-1 platforms per chunk
             # Scale difficulty based on player progress
             progress = min(1.0, player_x / LEVEL_LENGTH)
             w = random.randint(80 - int(20 * progress), 180 - int(40 * progress))
             h = 16
-            x = base_x + random.randint(-80, CHUNK_W - 60)
-            # Fix #2: Tighter y-range based on max jump height
-            y = random.randint(max(120, last_y - int(max_jump_height)), min(HEIGHT - 140, last_y + int(max_jump_height)))
-            last_y = y
-            if random.random() < 0.15:
-                move_min = max(x - 80, cx * CHUNK_W)
-                move_max = min(x + 120, (cx + 1) * CHUNK_W + 100)
-                speed = random.randint(1, 3 + int(2 * progress))
-                p = Platform(x, y, w, h, moving=True, move_range=(move_min, move_max), speed=speed)
-            else:
-                p = Platform(x, y, w, h)
-            platforms.add(p)
+            x = base_x + random.randint(-200, CHUNK_W - 50) # Wider x-range 
+            # Tighter y-range based on max jump height
+            # Wider y-range for more vertical spread, still reachable
+            y = random.randint(max(120, last_y - int(max_jump_height)), min(HEIGHT - 140, last_y + int(2.0 * max_jump_height)))
+            new_rect = pygame.Rect(x, y, w, h)
+            overlap = False # Check for overlap with existing platforms
+            buffer = 200 # Minimum distance between platforms
+            for p in platforms:
+                buffered_rect = p.rect.inflate(buffer, buffer)  # Add buffer around existing platform
+                if new_rect.colliderect(buffered_rect):
+                    overlap = True
+                    break
+            if not overlap:
+                last_y = y
+                if random.random() < 0.15:
+                    move_min = max(x - 80, cx * CHUNK_W)
+                    move_max = min(x + 120, (cx + 1) * CHUNK_W + 100)
+                    speed = random.randint(1, 3 + int(2 * progress))
+                    p = Platform(x, y, w, h, moving=True, move_range=(move_min, move_max), speed=speed)
+                else:
+                    p = Platform(x, y, w, h)
+                platforms.add(p)
 
 # ---- Main Game Loop: Modified reset and camera logic for Reset Issue (Fix #1) and Camera Jitter (Fix #3) ----
 def main():
@@ -316,11 +337,12 @@ def main():
     start_time = pygame.time.get_ticks()
     won = False
 
-    def reset():
+    def reset(to_checkpoint=True):
         nonlocal platforms, checkpoints, generated_chunks, player, flag, start_time, won, last_checkpoint
         platforms, checkpoints, holes = initial_platforms()
         generated_chunks = set()
-        player = Chicken(last_checkpoint[0], last_checkpoint[1])
+        spawn_x, spawn_y = last_checkpoint if to_checkpoint else (100, HEIGHT - 120)
+        player = Chicken(spawn_x, spawn_y)
         flag = Flag(LEVEL_LENGTH, HEIGHT - 40)
         start_time = pygame.time.get_ticks()
         won = False
@@ -344,9 +366,9 @@ def main():
                     else:
                         player.jump_buffer = 100
                 elif event.key == pygame.K_r:
-                    player, platforms, flag = reset()
+                    player, platforms, flag = reset(to_checkpoint=True) # Reset to checkpoint on "R"
                 elif event.key == pygame.K_RETURN and won:
-                    player, platforms, flag = reset()
+                    player, platforms, flag = reset(to_checkpoint=False) # Reset to start on win
 
         keys = pygame.key.get_pressed()
         player.vx = 0
@@ -379,12 +401,13 @@ def main():
         player.update(platforms, particles)
 
         for cp in checkpoints:
-            if player.rect.colliderect(cp.rect):
+            if not cp.activated and player.rect.centerx > cp.x: # Modified: Check if player passes checkpoint's x-coordinates instead of collision detection
+                cp.activate()   
                 last_checkpoint = (cp.x, HEIGHT - 120)
         # Change: Check for hole collision
         if pygame.sprite.spritecollide(player, holes, False):
             print(f"Reset triggered: Fell into hole at y={player.rect.y}, x={player.rect.centerx}")
-            player, platforms, flag = reset()
+            player, platforms, flag = reset(to_checkpoint=True)  # Reset to checkpoint on hole
 
         if player.rect.colliderect(flag.rect) and not won:
             won = True
@@ -395,7 +418,7 @@ def main():
         # Modified: Add debug and stricter lose condition
         if player.rect.top > HEIGHT + 300 and player.vy > 0:
             print(f"Reset triggered: y={player.rect.y}, vy={player.vy}, on_ground={player.on_ground}")
-            player, platforms, flag = reset()
+            player, platforms, flag = reset(to_checkpoint=True) # Reset to checkpoint on fall
 
         screen.fill(BG_COLOR)
         for i in range(6):
