@@ -156,24 +156,57 @@ class Chicken(pygame.sprite.Sprite):
             elif self.vx < 0:
                 self.rect.left = p.rect.right
             self.vx = 0
-# ---- Chicken Class: Modified collide_vertical for Particle Effect Performance (Fix #4) ----
 
-    
+
+
+
+    # def collide_vertical(self, platforms, particles):
+    #     hits = pygame.sprite.spritecollide(self, platforms, False)
+    #     self.last_platform = None  # Reset last platform
+    #     landed_this_frame = False  # Track if we land during this call
+        
+    #     for p in hits:
+    #         if self.vy > 0:
+    #             # Check BEFORE we modify on_ground - this is the key!
+    #             if not self.on_ground and not self.was_on_ground:
+    #                 landed_this_frame = True
+                
+    #             self.rect.bottom = p.rect.top
+    #             self.on_ground = True
+    #             self.last_platform = p  # Track the platform we landed on
+    #         elif self.vy < 0:
+    #             self.rect.top = p.rect.bottom
+    #         self.vy = 0  # Reset velocity for both cases to stabilize physics
+        
+    #     # Spawn particles only once per landing event
+    #     if landed_this_frame and len(particles) < 50:
+    #         for _ in range(5):
+    #             particles.add(Particle(self.rect.centerx, self.rect.bottom))
+        
+    #     self.was_on_ground = self.on_ground
+
     def collide_vertical(self, platforms, particles):
         hits = pygame.sprite.spritecollide(self, platforms, False)
         self.last_platform = None  # Reset last platform
+        
         for p in hits:
             if self.vy > 0:
+                # Only spawn particles if we were NOT on ground last frame AND we are falling
+                # This ensures it only triggers on the landing transition, not every frame
+                if not self.was_on_ground and self.vy > 5:  # Add velocity threshold to avoid micro-bounces
+                    if len(particles) < 50:
+                        for _ in range(5):
+                            particles.add(Particle(self.rect.centerx, self.rect.bottom))
+                
                 self.rect.bottom = p.rect.top
                 self.on_ground = True
                 self.last_platform = p  # Track the platform we landed on
-                if not self.was_on_ground and self.vy > 0 and len(particles) < 50:  # Fix #4: Limit particles
-                    for _ in range(5):
-                        particles.add(Particle(self.rect.centerx, self.rect.bottom))
             elif self.vy < 0:
                 self.rect.top = p.rect.bottom
             self.vy = 0  # Reset velocity for both cases to stabilize physics
+        
         self.was_on_ground = self.on_ground
+
 
     def can_jump(self):
         return self.on_ground
