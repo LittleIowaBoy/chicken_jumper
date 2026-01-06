@@ -158,33 +158,6 @@ class Chicken(pygame.sprite.Sprite):
             self.vx = 0
 
 
-
-
-    # def collide_vertical(self, platforms, particles):
-    #     hits = pygame.sprite.spritecollide(self, platforms, False)
-    #     self.last_platform = None  # Reset last platform
-    #     landed_this_frame = False  # Track if we land during this call
-        
-    #     for p in hits:
-    #         if self.vy > 0:
-    #             # Check BEFORE we modify on_ground - this is the key!
-    #             if not self.on_ground and not self.was_on_ground:
-    #                 landed_this_frame = True
-                
-    #             self.rect.bottom = p.rect.top
-    #             self.on_ground = True
-    #             self.last_platform = p  # Track the platform we landed on
-    #         elif self.vy < 0:
-    #             self.rect.top = p.rect.bottom
-    #         self.vy = 0  # Reset velocity for both cases to stabilize physics
-        
-    #     # Spawn particles only once per landing event
-    #     if landed_this_frame and len(particles) < 50:
-    #         for _ in range(5):
-    #             particles.add(Particle(self.rect.centerx, self.rect.bottom))
-        
-    #     self.was_on_ground = self.on_ground
-
     def collide_vertical(self, platforms, particles):
         hits = pygame.sprite.spritecollide(self, platforms, False)
         self.last_platform = None  # Reset last platform
@@ -315,36 +288,96 @@ def initial_platforms():
     return platforms, checkpoints, holes  # Change: Return holes group
 
 
+# def gen_platforms_for_range(platforms, existing_xs, start_x, end_x, player_x):
+#     CHUNK_W = 700 # Increased from 500 to 700 for wider horizontal spacing
+#     cx_start = start_x // CHUNK_W
+#     cx_end = end_x // CHUNK_W
+#     last_y = HEIGHT - 140  # Track last platform y for reachability
+#     max_jump_height = abs(PLAYER_JUMP_SPEED) ** 2 / (2 * GRAVITY)  # Fix #2: Calculate max jump height
+#     for cx in range(cx_start, cx_end + 1):
+#         if cx in existing_xs:
+#             continue
+#         existing_xs.add(cx)
+#         base_x = cx * CHUNK_W + 200
+#         for i in range(random.randint(5,10)): 
+#             # Scale difficulty based on player progress
+#             progress = min(1.0, player_x / LEVEL_LENGTH)
+#             w = random.randint(80 - int(20 * progress), 180 - int(40 * progress))
+#             h = 16
+#             x = base_x + random.randint(-200, CHUNK_W - 50) # Wider x-range 
+#             # Tighter y-range based on max jump height
+#             # Wider y-range for more vertical spread, still reachable
+#             y = random.randint(max(120, last_y - int(max_jump_height)), min(HEIGHT - 140, last_y + int(2.0 * max_jump_height)))
+#             new_rect = pygame.Rect(x, y, w, h)
+#             overlap = False # Check for overlap with existing platforms
+#             buffer = 200 # Minimum distance between platforms
+#             for p in platforms:
+#                 buffered_rect = p.rect.inflate(buffer, buffer)  # Add buffer around existing platform
+#                 if new_rect.colliderect(buffered_rect):
+#                     overlap = True
+#                     break
+#             if not overlap:
+#                 last_y = y
+#                 if random.random() < 0.15:
+#                     move_min = max(x - 80, cx * CHUNK_W)
+#                     move_max = min(x + 120, (cx + 1) * CHUNK_W + 100)
+#                     speed = random.randint(1, 3 + int(2 * progress))
+#                     p = Platform(x, y, w, h, moving=True, move_range=(move_min, move_max), speed=speed)
+#                 else:
+#                     p = Platform(x, y, w, h)
+#                 platforms.add(p)
+
 def gen_platforms_for_range(platforms, existing_xs, start_x, end_x, player_x):
-    CHUNK_W = 700 # Increased from 500 to 700 for wider horizontal spacing
+    CHUNK_W = 700
+    PLATFORMS_PER_CHUNK = 7  # Fixed count instead of random
+    
     cx_start = start_x // CHUNK_W
     cx_end = end_x // CHUNK_W
-    last_y = HEIGHT - 140  # Track last platform y for reachability
-    max_jump_height = abs(PLAYER_JUMP_SPEED) ** 2 / (2 * GRAVITY)  # Fix #2: Calculate max jump height
+    
     for cx in range(cx_start, cx_end + 1):
         if cx in existing_xs:
             continue
         existing_xs.add(cx)
+        
         base_x = cx * CHUNK_W + 200
-        for i in range(random.randint(5,10)): # 0-1 platforms per chunk
-            # Scale difficulty based on player progress
-            progress = min(1.0, player_x / LEVEL_LENGTH)
+        last_y = HEIGHT - 140
+        max_jump_height = abs(PLAYER_JUMP_SPEED) ** 2 / (2 * GRAVITY)
+        
+        # Scale difficulty based on player progress
+        progress = min(1.0, player_x / LEVEL_LENGTH)
+        
+        attempts = 0
+        platforms_created = 0
+        max_attempts = PLATFORMS_PER_CHUNK * 5  # Allow multiple attempts
+        
+        # Keep trying until we create enough platforms or run out of attempts
+        while platforms_created < PLATFORMS_PER_CHUNK and attempts < max_attempts:
+            attempts += 1
+            
             w = random.randint(80 - int(20 * progress), 180 - int(40 * progress))
             h = 16
-            x = base_x + random.randint(-200, CHUNK_W - 50) # Wider x-range 
-            # Tighter y-range based on max jump height
-            # Wider y-range for more vertical spread, still reachable
-            y = random.randint(max(120, last_y - int(max_jump_height)), min(HEIGHT - 140, last_y + int(2.0 * max_jump_height)))
+            x = base_x + random.randint(-200, CHUNK_W - 50)
+            y = random.randint(
+                max(120, last_y - int(max_jump_height)), 
+                min(HEIGHT - 140, last_y + int(2.0 * max_jump_height))
+            )
+            
             new_rect = pygame.Rect(x, y, w, h)
-            overlap = False # Check for overlap with existing platforms
-            buffer = 200 # Minimum distance between platforms
+            overlap = False
+            
+            # Reduced buffer for less rejection
+            buffer = 150  # Changed from 200 to 150
+            
             for p in platforms:
-                buffered_rect = p.rect.inflate(buffer, buffer)  # Add buffer around existing platform
+                buffered_rect = p.rect.inflate(buffer, buffer)
                 if new_rect.colliderect(buffered_rect):
                     overlap = True
                     break
+            
             if not overlap:
                 last_y = y
+                platforms_created += 1
+                
                 if random.random() < 0.15:
                     move_min = max(x - 80, cx * CHUNK_W)
                     move_max = min(x + 120, (cx + 1) * CHUNK_W + 100)
