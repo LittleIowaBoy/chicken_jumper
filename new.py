@@ -20,6 +20,32 @@ GEN_AHEAD = 1400  # Pixels ahead of camera to generate platforms
 GEN_BUFFER = 400  # Keep platforms behind this distance before removing
 LEVEL_LENGTH = 5000  # Total level endpoint x coordinate
 
+# Particle settings
+PARTICLE_SPAWN_COUNT = 5
+PARTICLE_POOL_LIMIT = 50
+PARTICLE_VELOCITY_MIN = -2
+PARTICLE_VELOCITY_MAX = 2
+PARTICLE_LIFETIME = 20
+
+# Checkpoint settings
+CHECKPOINT_SPACING = 1000
+
+# Platform generation
+CHUNK_WIDTH = 700
+PLATFORMS_PER_CHUNK = 7
+PLATFORM_BUFFER = 150
+
+# Camera
+CAMERA_SMOOTHING = 0.15
+CAMERA_OFFSET_X_RATIO = 3  # WIDTH // 3
+
+# Cloud rendering
+CLOUD_WIDTH = 120
+CLOUD_HEIGHT = 40
+CLOUD_SPACING = 220
+CLOUD_Y_OFFSET = 80
+CLOUD_Y_STEP = 20
+
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 clock = pygame.time.Clock()
@@ -36,9 +62,9 @@ class Particle(pygame.sprite.Sprite):
         self.image = pygame.Surface((8, 8), pygame.SRCALPHA)
         pygame.draw.circle(self.image, (200, 200, 200), (4, 4), 4)
         self.rect = self.image.get_rect(center=(x, y))
-        self.vx = random.uniform(-2, 2)
-        self.vy = random.uniform(-2, 0)
-        self.lifetime = 20  # Frames
+        self.vx = random.uniform(PARTICLE_VELOCITY_MIN, PARTICLE_VELOCITY_MAX)
+        self.vy = random.uniform(PARTICLE_VELOCITY_MIN, 0)
+        self.lifetime = PARTICLE_LIFETIME  # Frames
 
     def update(self):
         self.rect.x += self.vx
@@ -54,6 +80,7 @@ class Platform(pygame.sprite.Sprite):
         self.image = pygame.Surface((w, h))
         self.image.fill(PLATFORM_COLOR)
         self.rect = self.image.get_rect(topleft=(x, y))
+        self.pos_x = float(self.rect.x)
         self.moving = moving
         self.speed = speed
         self.move_range = move_range
@@ -61,10 +88,12 @@ class Platform(pygame.sprite.Sprite):
 
     def update(self, camera_x):
         if self.moving:
-            self.rect.x += self.direction * self.speed
+            self.pos_x += self.direction * self.speed
+            self.rect.x = int(self.pos_x)
             if self.rect.x < self.move_range[0] or self.rect.x > self.move_range[1]:
                 self.direction *= -1
-                self.rect.x += self.direction * self.speed
+                self.pos_x += self.direction * self.speed
+                self.rect.x = int(self.pos_x)
 
 class Checkpoint(pygame.sprite.Sprite):
     def __init__(self, x, ground_y):
@@ -101,23 +130,14 @@ class Flag(pygame.sprite.Sprite):
         pygame.draw.rect(self.image, pole_color, (16, 0, 4, 64))
         pygame.draw.polygon(self.image, flag_color, [(18, 8), (36, 18), (18, 28)])
 
-    def update(self, camera_x):
-        pass
-
-# ---- New: Hole Class for Ground Holes ----
-class Hole(pygame.sprite.Sprite):
-    def __init__(self, x, width, ground_y):
-        super().__init__()
-        self.image = pygame.Surface((width, 40))
-        self.image.fill((50, 50, 50))  # Dark gray for visibility
-        self.rect = self.image.get_rect(topleft=(x, ground_y))
-
 class Chicken(pygame.sprite.Sprite):
     def __init__(self, x, y):
         super().__init__()
         self.base_w, self.base_h = 48, 48
         self.image = pygame.Surface((self.base_w, self.base_h), pygame.SRCALPHA)
         self.rect = self.image.get_rect(center=(x, y))
+        self.pos_x = float(self.rect.x)
+        self.pos_y = float(self.rect.y)
         self.vx = 0
         self.vy = 0
         self.on_ground = False
@@ -129,32 +149,38 @@ class Chicken(pygame.sprite.Sprite):
         self.jump_buffer = 0
         
     def update_physics(self, platforms, particles):
-        # New: Use smaller steps for more precise collision detection
+        # Use smaller steps for more precise collision detection
         steps = max(1, int(abs(self.vy) / 10))  # Break movement into smaller steps
         step_vy = self.vy / steps
         step_vx = self.vx / steps
+        prev_on_ground = self.on_ground
+        prev_platform = self.last_platform
         self.on_ground = False  # Reset on_ground each update
+        
+        platform_vx = 0
+        if prev_on_ground and prev_platform and prev_platform.moving:
+            platform_vx = prev_platform.direction * prev_platform.speed
+        
         for _ in range(steps):
-            self.rect.x += int(step_vx)
-            self.collide_horizontal(platforms)
-            self.rect.y += int(step_vy)
+            # Apply character velocity plus platform velocity if standing on it
+            self.pos_x += step_vx + platform_vx
+            self.rect.x = int(self.pos_x)
+            self.collide_horizontal(platforms, ignore_platform=prev_platform if prev_on_ground else None)
+            self.pos_y += step_vy
+            self.rect.y = int(self.pos_y)
             self.collide_vertical(platforms, particles)
         self.vy += GRAVITY
-        # New: Move with the platform if standing on it
-        if self.on_ground and self.last_platform and self.last_platform.moving:
-            self.rect.x += self.last_platform.direction * self.last_platform.speed
 
-        # New: Move with the platform if standing on it
-        if self.on_ground and self.last_platform and self.last_platform.moving:
-            self.rect.x += self.last_platform.direction * self.last_platform.speed
-
-    def collide_horizontal(self, platforms):
+    def collide_horizontal(self, platforms, ignore_platform=None):
         hits = pygame.sprite.spritecollide(self, platforms, False)
         for p in hits:
+            if ignore_platform is not None and p is ignore_platform:
+                continue
             if self.vx > 0:
                 self.rect.right = p.rect.left
             elif self.vx < 0:
                 self.rect.left = p.rect.right
+            self.pos_x = float(self.rect.x)
             self.vx = 0
 
 
@@ -167,8 +193,8 @@ class Chicken(pygame.sprite.Sprite):
                 # Only spawn particles if we were NOT on ground last frame AND we are falling
                 # This ensures it only triggers on the landing transition, not every frame
                 if not self.was_on_ground and self.vy > 5:  # Add velocity threshold to avoid micro-bounces
-                    if len(particles) < 50:
-                        for _ in range(5):
+                    if len(particles) < PARTICLE_POOL_LIMIT:
+                        for _ in range(PARTICLE_SPAWN_COUNT):
                             particles.add(Particle(self.rect.centerx, self.rect.bottom))
                 
                 self.rect.bottom = p.rect.top
@@ -176,6 +202,7 @@ class Chicken(pygame.sprite.Sprite):
                 self.last_platform = p  # Track the platform we landed on
             elif self.vy < 0:
                 self.rect.top = p.rect.bottom
+            self.pos_y = float(self.rect.y)
             self.vy = 0  # Reset velocity for both cases to stabilize physics
         
         self.was_on_ground = self.on_ground
@@ -257,19 +284,8 @@ class Chicken(pygame.sprite.Sprite):
 # ---- Level Generation ----
 def initial_platforms():
     platforms = pygame.sprite.Group()
-    holes = pygame.sprite.Group()
     ground_y = HEIGHT - 40
-    # Change: Create segmented ground with holes
-    segment_width = 400
-    hole_width = 100
-    for x in range(0, LEVEL_LENGTH + 400, segment_width + hole_width):
-        # Add ground segment
-        platforms.add(Platform(x, ground_y, segment_width, 40))
-        # Add hole after segment (except at the end to ensure flag is on ground)
-        if x + segment_width < LEVEL_LENGTH:
-            holes.add(Hole(x + segment_width, hole_width, ground_y))
-    # Ensure flag has a platform
-    platforms.add(Platform(LEVEL_LENGTH - 100, ground_y, 200, 40))
+    # Initial starter platforms from which the player begins
     starter = [
         (120, 460, 160, 18),
         (320, 380, 130, 18),
@@ -282,54 +298,20 @@ def initial_platforms():
         platforms.add(Platform(x, y, w, h))
     moving = Platform(600, 520, 120, 16, moving=True, move_range=(520, 760), speed=2)
     platforms.add(moving)
+    # Platform for the end goal flag
+    platforms.add(Platform(LEVEL_LENGTH - 150, 300, 200, 18))
+    # Add checkpoints with platforms underneath them
     checkpoints = pygame.sprite.Group()
-    for x in range(1000, LEVEL_LENGTH, 1000):
+    for x in range(CHECKPOINT_SPACING, LEVEL_LENGTH, CHECKPOINT_SPACING):
         checkpoints.add(Checkpoint(x, ground_y))
-    return platforms, checkpoints, holes  # Change: Return holes group
+        # Add a platform underneath each checkpoint (20 pixels wide, so make platform slightly wider)
+        platforms.add(Platform(x - 15, ground_y, 50, 16))
+    return platforms, checkpoints
 
-
-# def gen_platforms_for_range(platforms, existing_xs, start_x, end_x, player_x):
-#     CHUNK_W = 700 # Increased from 500 to 700 for wider horizontal spacing
-#     cx_start = start_x // CHUNK_W
-#     cx_end = end_x // CHUNK_W
-#     last_y = HEIGHT - 140  # Track last platform y for reachability
-#     max_jump_height = abs(PLAYER_JUMP_SPEED) ** 2 / (2 * GRAVITY)  # Fix #2: Calculate max jump height
-#     for cx in range(cx_start, cx_end + 1):
-#         if cx in existing_xs:
-#             continue
-#         existing_xs.add(cx)
-#         base_x = cx * CHUNK_W + 200
-#         for i in range(random.randint(5,10)): 
-#             # Scale difficulty based on player progress
-#             progress = min(1.0, player_x / LEVEL_LENGTH)
-#             w = random.randint(80 - int(20 * progress), 180 - int(40 * progress))
-#             h = 16
-#             x = base_x + random.randint(-200, CHUNK_W - 50) # Wider x-range 
-#             # Tighter y-range based on max jump height
-#             # Wider y-range for more vertical spread, still reachable
-#             y = random.randint(max(120, last_y - int(max_jump_height)), min(HEIGHT - 140, last_y + int(2.0 * max_jump_height)))
-#             new_rect = pygame.Rect(x, y, w, h)
-#             overlap = False # Check for overlap with existing platforms
-#             buffer = 200 # Minimum distance between platforms
-#             for p in platforms:
-#                 buffered_rect = p.rect.inflate(buffer, buffer)  # Add buffer around existing platform
-#                 if new_rect.colliderect(buffered_rect):
-#                     overlap = True
-#                     break
-#             if not overlap:
-#                 last_y = y
-#                 if random.random() < 0.15:
-#                     move_min = max(x - 80, cx * CHUNK_W)
-#                     move_max = min(x + 120, (cx + 1) * CHUNK_W + 100)
-#                     speed = random.randint(1, 3 + int(2 * progress))
-#                     p = Platform(x, y, w, h, moving=True, move_range=(move_min, move_max), speed=speed)
-#                 else:
-#                     p = Platform(x, y, w, h)
-#                 platforms.add(p)
 
 def gen_platforms_for_range(platforms, existing_xs, start_x, end_x, player_x):
-    CHUNK_W = 700
-    PLATFORMS_PER_CHUNK = 7  # Fixed count instead of random
+    CHUNK_W = CHUNK_WIDTH
+    PLATFORMS_PER_CHUNK_VAL = PLATFORMS_PER_CHUNK
     
     cx_start = start_x // CHUNK_W
     cx_end = end_x // CHUNK_W
@@ -340,7 +322,13 @@ def gen_platforms_for_range(platforms, existing_xs, start_x, end_x, player_x):
         existing_xs.add(cx)
         
         base_x = cx * CHUNK_W + 200
-        last_y = HEIGHT - 140
+        # Find the highest platform in existing platforms to ensure connectivity
+        max_existing_y = HEIGHT - 140
+        for p in platforms:
+            if cx * CHUNK_W <= p.rect.centerx <= (cx + 1) * CHUNK_W + 100:
+                max_existing_y = min(max_existing_y, p.rect.top)
+        
+        last_y = max_existing_y
         max_jump_height = abs(PLAYER_JUMP_SPEED) ** 2 / (2 * GRAVITY)
         
         # Scale difficulty based on player progress
@@ -348,25 +336,24 @@ def gen_platforms_for_range(platforms, existing_xs, start_x, end_x, player_x):
         
         attempts = 0
         platforms_created = 0
-        max_attempts = PLATFORMS_PER_CHUNK * 5  # Allow multiple attempts
+        max_attempts = PLATFORMS_PER_CHUNK_VAL * 5
         
         # Keep trying until we create enough platforms or run out of attempts
-        while platforms_created < PLATFORMS_PER_CHUNK and attempts < max_attempts:
+        while platforms_created < PLATFORMS_PER_CHUNK_VAL and attempts < max_attempts:
             attempts += 1
             
             w = random.randint(80 - int(20 * progress), 180 - int(40 * progress))
             h = 16
             x = base_x + random.randint(-200, CHUNK_W - 50)
+            # Ensure platform is reachable from last platform
             y = random.randint(
                 max(120, last_y - int(max_jump_height)), 
-                min(HEIGHT - 140, last_y + int(2.0 * max_jump_height))
+                min(HEIGHT - 140, last_y + int(1.5 * max_jump_height))
             )
             
             new_rect = pygame.Rect(x, y, w, h)
             overlap = False
-            
-            # Reduced buffer for less rejection
-            buffer = 150  # Changed from 200 to 150
+            buffer = PLATFORM_BUFFER
             
             for p in platforms:
                 buffered_rect = p.rect.inflate(buffer, buffer)
@@ -391,10 +378,10 @@ def gen_platforms_for_range(platforms, existing_xs, start_x, end_x, player_x):
 def main():
     global best_time
     pygame.display.set_caption("Chicken Platformer - Reach the Flag!")
-    platforms, checkpoints, holes = initial_platforms()
+    platforms, checkpoints = initial_platforms()
     generated_chunks = set()
     player = Chicken(100, HEIGHT - 120)
-    flag = Flag(LEVEL_LENGTH, HEIGHT - 40)
+    flag = Flag(LEVEL_LENGTH - 50, 300)
     particles = pygame.sprite.Group()
     all_sprites = pygame.sprite.Group()
     all_sprites.add(player)
@@ -405,11 +392,13 @@ def main():
 
     def reset(to_checkpoint=True):
         nonlocal platforms, checkpoints, generated_chunks, player, flag, start_time, won, last_checkpoint
-        platforms, checkpoints, holes = initial_platforms()
+        platforms, checkpoints = initial_platforms()
         generated_chunks = set()
         spawn_x, spawn_y = last_checkpoint if to_checkpoint else (100, HEIGHT - 120)
         player = Chicken(spawn_x, spawn_y)
-        flag = Flag(LEVEL_LENGTH, HEIGHT - 40)
+        if to_checkpoint:
+            platforms.add(Platform(player.rect.centerx - 60, player.rect.bottom, 120, 16))
+        flag = Flag(LEVEL_LENGTH - 50, 300)
         start_time = pygame.time.get_ticks()
         won = False
         # Fix #1: Explicitly reset moving platforms
@@ -445,16 +434,13 @@ def main():
             player.vx = PLAYER_SPEED
             player.facing_right = True
 
-        target_camera_x = player.rect.centerx - WIDTH // 3
+        target_camera_x = player.rect.centerx - WIDTH // CAMERA_OFFSET_X_RATIO
         # Fix #3: Faster smoothing and clamp camera
-        camera_x += (target_camera_x - camera_x) * 0.15
+        camera_x += (target_camera_x - camera_x) * CAMERA_SMOOTHING
         camera_x = max(0, min(camera_x, LEVEL_LENGTH - WIDTH + 200))
 
         gen_start = camera_x
         gen_end = camera_x + GEN_AHEAD
-
-        for h in holes:
-            screen.blit(h.image, (h.rect.x - camera_x, h.rect.y))
 
         gen_platforms_for_range(platforms, generated_chunks, int(gen_start), int(gen_end), player.rect.centerx)
 
@@ -470,10 +456,6 @@ def main():
             if not cp.activated and player.rect.centerx > cp.x: # Modified: Check if player passes checkpoint's x-coordinates instead of collision detection
                 cp.activate()   
                 last_checkpoint = (cp.x, HEIGHT - 120)
-        # Change: Check for hole collision
-        if pygame.sprite.spritecollide(player, holes, False):
-            print(f"Reset triggered: Fell into hole at y={player.rect.y}, x={player.rect.centerx}")
-            player, platforms, flag = reset(to_checkpoint=True)  # Reset to checkpoint on hole
 
         if player.rect.colliderect(flag.rect) and not won:
             won = True
@@ -488,8 +470,8 @@ def main():
 
         screen.fill(BG_COLOR)
         for i in range(6):
-            cx = (i * 220 - camera_x * 0.2) % (WIDTH + 200) - 100
-            pygame.draw.ellipse(screen, (255, 255, 255, 180), (cx, 80 + (i % 3) * 20, 120, 40))
+            cx = (i * CLOUD_SPACING - camera_x * 0.2) % (WIDTH + 200) - 100
+            pygame.draw.ellipse(screen, (255, 255, 255, 180), (cx, CLOUD_Y_OFFSET + (i % 3) * CLOUD_Y_STEP, CLOUD_WIDTH, CLOUD_HEIGHT))
         for p in platforms:
             screen.blit(p.image, (p.rect.x - camera_x, p.rect.y))
         for cp in checkpoints:
