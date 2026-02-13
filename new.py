@@ -35,6 +35,10 @@ CHUNK_WIDTH = 700
 PLATFORMS_PER_CHUNK = 7
 PLATFORM_BUFFER = 150
 
+# Portal spawn (reuse starter platform at y=460)
+PORTAL_X = 200
+PORTAL_PLATFORM_Y = 460
+
 # Camera
 CAMERA_SMOOTHING = 0.15
 CAMERA_OFFSET_X_RATIO = 3  # WIDTH // 3
@@ -130,6 +134,20 @@ class Flag(pygame.sprite.Sprite):
         pygame.draw.rect(self.image, pole_color, (16, 0, 4, 64))
         pygame.draw.polygon(self.image, flag_color, [(18, 8), (36, 18), (18, 28)])
 
+class Portal(pygame.sprite.Sprite):
+    def __init__(self, x, ground_y):
+        super().__init__()
+        self.x = x
+        self.ground_y = ground_y
+        self.image = pygame.Surface((36, 64), pygame.SRCALPHA)
+        self.rect = self.image.get_rect(midbottom=(x, ground_y))
+        self.draw_portal()
+
+    def draw_portal(self):
+        self.image.fill((0, 0, 0, 0))
+        pygame.draw.ellipse(self.image, (90, 30, 160), (2, 6, 32, 56))
+        pygame.draw.ellipse(self.image, (180, 120, 240), (8, 14, 20, 40))
+
 class Chicken(pygame.sprite.Sprite):
     def __init__(self, x, y):
         super().__init__()
@@ -170,6 +188,11 @@ class Chicken(pygame.sprite.Sprite):
             self.rect.y = int(self.pos_y)
             self.collide_vertical(platforms, particles)
         self.vy += GRAVITY
+
+        # If we just landed on a moving platform, inherit its motion immediately
+        if not prev_on_ground and self.on_ground and self.last_platform and self.last_platform.moving:
+            self.pos_x += self.last_platform.direction * self.last_platform.speed
+            self.rect.x = int(self.pos_x)
 
     def collide_horizontal(self, platforms, ignore_platform=None):
         hits = pygame.sprite.spritecollide(self, platforms, False)
@@ -298,6 +321,8 @@ def initial_platforms():
         platforms.add(Platform(x, y, w, h))
     moving = Platform(600, 520, 120, 16, moving=True, move_range=(520, 760), speed=2)
     platforms.add(moving)
+    # Portal for initial spawn (on starter platform)
+    portal = Portal(PORTAL_X, PORTAL_PLATFORM_Y)
     # Platform for the end goal flag
     platforms.add(Platform(LEVEL_LENGTH - 150, 300, 200, 18))
     # Add checkpoints with platforms underneath them
@@ -306,7 +331,7 @@ def initial_platforms():
         checkpoints.add(Checkpoint(x, ground_y))
         # Add a platform underneath each checkpoint (20 pixels wide, so make platform slightly wider)
         platforms.add(Platform(x - 15, ground_y, 50, 16))
-    return platforms, checkpoints
+    return platforms, checkpoints, portal
 
 
 def gen_platforms_for_range(platforms, existing_xs, start_x, end_x, player_x):
@@ -378,26 +403,35 @@ def gen_platforms_for_range(platforms, existing_xs, start_x, end_x, player_x):
 def main():
     global best_time
     pygame.display.set_caption("Chicken Platformer - Reach the Flag!")
-    platforms, checkpoints = initial_platforms()
+    platforms, checkpoints, portal = initial_platforms()
     generated_chunks = set()
-    player = Chicken(100, HEIGHT - 120)
+    player = Chicken(PORTAL_X, PORTAL_PLATFORM_Y - 24)
     flag = Flag(LEVEL_LENGTH - 50, 300)
     particles = pygame.sprite.Group()
     all_sprites = pygame.sprite.Group()
     all_sprites.add(player)
-    last_checkpoint = (100, HEIGHT - 120)
+    last_checkpoint = (PORTAL_X, PORTAL_PLATFORM_Y - 24)
     camera_x = 0
     start_time = pygame.time.get_ticks()
     won = False
 
+    def ensure_portal_platform():
+        portal_platform = pygame.Rect(PORTAL_X - 60, PORTAL_PLATFORM_Y, 120, 18)
+        if not any(p.rect.colliderect(portal_platform) for p in platforms):
+            platforms.add(Platform(PORTAL_X - 60, PORTAL_PLATFORM_Y, 120, 18))
+
     def reset(to_checkpoint=True):
-        nonlocal platforms, checkpoints, generated_chunks, player, flag, start_time, won, last_checkpoint
-        platforms, checkpoints = initial_platforms()
+        nonlocal platforms, checkpoints, portal, generated_chunks, player, flag, start_time, won, last_checkpoint, camera_x
+        platforms, checkpoints, portal = initial_platforms()
         generated_chunks = set()
         spawn_x, spawn_y = last_checkpoint if to_checkpoint else (100, HEIGHT - 120)
-        player = Chicken(spawn_x, spawn_y)
         if to_checkpoint:
-            platforms.add(Platform(player.rect.centerx - 60, player.rect.bottom, 120, 16))
+            player = Chicken(spawn_x, spawn_y)
+        else:
+            player = Chicken(PORTAL_X, PORTAL_PLATFORM_Y - 24)
+            camera_x = 0
+            ensure_portal_platform()
+        platforms.add(Platform(player.rect.centerx - 60, player.rect.bottom, 120, 16))
         flag = Flag(LEVEL_LENGTH - 50, 300)
         start_time = pygame.time.get_ticks()
         won = False
@@ -476,6 +510,7 @@ def main():
             screen.blit(p.image, (p.rect.x - camera_x, p.rect.y))
         for cp in checkpoints:
             screen.blit(cp.image, (cp.rect.x - camera_x, cp.rect.y))
+        screen.blit(portal.image, (portal.rect.x - camera_x, portal.rect.y))
         screen.blit(flag.image, (flag.rect.x - camera_x, flag.rect.y))
         for p in particles:
             screen.blit(p.image, (p.rect.x - camera_x, p.rect.y))
