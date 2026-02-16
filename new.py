@@ -40,11 +40,11 @@ CHECKPOINT_SPACING = 1000
 
 # Platform generation
 CHUNK_WIDTH = 700
-CHUNK_HEIGHT = 80
-PLATFORMS_PER_CHUNK = 7
+CHUNK_HEIGHT = 400  # Increased for 20x20 grid
+PLATFORMS_PER_CHUNK = 12
 PLATFORM_BUFFER = 150
 LEVEL_CHUNKS_X = 20
-LEVEL_CHUNKS_Y = 5
+LEVEL_CHUNKS_Y = 20  # 20x20 background grid
 
 # Portal spawn (reuse starter platform at y=460)
 PORTAL_X = 200
@@ -136,6 +136,7 @@ class Checkpoint(pygame.sprite.Sprite):
         self.image = pygame.Surface((20, 40), pygame.SRCALPHA)
         self.rect = self.image.get_rect(midbottom=(x, ground_y))
         self.x = x
+        self.y = ground_y - 24  # Store Y position for respawning (above platform)
         self.activated = False  # Track if checkpoint is triggered
         self.draw()
 
@@ -236,9 +237,6 @@ class Chicken(pygame.sprite.Sprite):
         self.slip_start_vx = 0
         
     def update_physics(self, platforms, particles):
-        # Use smaller steps for more precise collision detection
-        steps = max(1, int(abs(self.vy) / 10))  # Break movement into smaller steps
-        step_vy = self.vy / steps
         prev_on_ground = self.on_ground
         prev_platform = self.last_platform
         self.on_ground = False  # Reset on_ground each update
@@ -267,21 +265,18 @@ class Chicken(pygame.sprite.Sprite):
         else:
             self.vx = self.desired_vx
             self.slip_active = False
-
-        step_vx = self.vx / steps
         
         platform_vx = 0
         if prev_on_ground and prev_platform and prev_platform.moving:
             platform_vx = prev_platform.direction * prev_platform.speed
         
-        for _ in range(steps):
-            # Apply character velocity plus platform velocity if standing on it
-            self.pos_x += step_vx + platform_vx
-            self.rect.x = int(self.pos_x)
-            self.collide_horizontal(platforms, ignore_platform=prev_platform if prev_on_ground else None)
-            self.pos_y += step_vy
-            self.rect.y = int(self.pos_y)
-            self.collide_vertical(platforms, particles)
+        # Apply character velocity plus platform velocity if standing on it
+        self.pos_x += self.vx + platform_vx
+        self.rect.x = int(self.pos_x)
+        self.collide_horizontal(platforms, ignore_platform=prev_platform if prev_on_ground else None)
+        self.pos_y += self.vy
+        self.rect.y = int(self.pos_y)
+        self.collide_vertical(platforms, particles)
         self.vy += GRAVITY
 
         # If we just landed on a moving platform, inherit its motion immediately
@@ -431,20 +426,18 @@ BASE_GRID_LAYOUT = [
 ]
 
 LEVEL_GRID_LAYOUTS = {
-    None: BASE_GRID_LAYOUT,
     0: BASE_GRID_LAYOUT,
     1: BASE_GRID_LAYOUT,
     2: BASE_GRID_LAYOUT,
     3: BASE_GRID_LAYOUT,
     4: BASE_GRID_LAYOUT,
+    5: BASE_GRID_LAYOUT,
 }
 
 def grid_level_length():
     return GRID_ORIGIN_X + (LEVEL_CHUNKS_X * CHUNK_WIDTH)
 
 def level_scale_for_index(level_index):
-    if level_index is None:
-        return 0.9
     return max(0.72, 0.9 - (level_index * 0.04))
 
 def make_add_platform(platforms, level_index):
@@ -462,6 +455,73 @@ def make_add_platform(platforms, level_index):
 def get_level_layout(level_index):
     return LEVEL_GRID_LAYOUTS.get(level_index, BASE_GRID_LAYOUT)
 
+def get_next_grid_coordinates(existing_coords, num_to_generate=5):
+    """
+    Generate next grid coordinates following the pattern from existing coords.
+    Pattern: gradually ascend with occasional flat sections.
+    """
+    if not existing_coords:
+        return [(1, 1)]
+    
+    # Find the rightmost coordinates
+    max_gx = max(gx for gx, gy in existing_coords)
+    coords_at_max_x = [gy for gx, gy in existing_coords if gx == max_gx]
+    current_gy = max(coords_at_max_x) if coords_at_max_x else 1
+    
+    # Analyze the pattern from BASE_GRID_LAYOUT to understand progression
+    # Pattern shows: gradual climb with some plateaus
+    new_coords = []
+    for i in range(num_to_generate):
+        new_gx = max_gx + i + 1
+        
+        # Every 3 cells, rise by 1 row (with some variation)
+        if i % 3 == 2:
+            current_gy += 1
+        
+        # Don't exceed reasonable height (20 rows)
+        current_gy = min(current_gy, 20)
+        
+        new_coords.append((new_gx, current_gy))
+    
+    return new_coords
+
+def add_bridge_platforms(prev_gx, prev_gy, curr_gx, curr_gy, add_platform, placed, surface_type="normal"):
+    """Add bridge platforms between chunks at different Y levels"""
+    if prev_gy >= curr_gy:
+        return  # No bridge needed for same level or going down
+    
+    y_diff = curr_gy - prev_gy
+    if y_diff == 0:
+        return
+    
+    # Calculate positions
+    prev_chunk_right = GRID_ORIGIN_X + prev_gx * CHUNK_WIDTH
+    curr_chunk_left = GRID_ORIGIN_X + (curr_gx - 1) * CHUNK_WIDTH
+    prev_chunk_bottom = GRID_ORIGIN_Y - (prev_gy - 1) * CHUNK_HEIGHT
+    curr_chunk_bottom = GRID_ORIGIN_Y - (curr_gy - 1) * CHUNK_HEIGHT
+    
+    # Create stepping stones from prev chunk to current chunk
+    num_steps = max(3, y_diff * 2)  # At least 3 steps, more for larger gaps
+    horizontal_gap = curr_chunk_left - prev_chunk_right
+    
+    for step in range(num_steps):
+        # Interpolate position between chunks
+        progress = (step + 1) / (num_steps + 1)
+        x = prev_chunk_right + (horizontal_gap * progress)
+        y = prev_chunk_bottom - (CHUNK_HEIGHT * y_diff * progress) + 50
+        
+        # Check for collision with existing platforms
+        collision = False
+        for existing_p in placed:
+            if (abs(existing_p.rect.centerx - x) < 100 and
+                abs(existing_p.rect.centery - y) < 100):
+                collision = True
+                break
+        
+        if not collision:
+            p = add_platform(x, y, 140, 18, moving=False, surface_type=surface_type)
+            placed.append(p)
+
 def add_grid_platforms(level_index, add_platform, surface_type="normal"):
     placed = []
     layout = get_level_layout(level_index)
@@ -469,50 +529,242 @@ def add_grid_platforms(level_index, add_platform, surface_type="normal"):
     base_speed = 1 if surface_type == "slippery" else 2
 
     for i, (gx, gy) in enumerate(layout):
-        world_x = GRID_ORIGIN_X + (gx - 1) * CHUNK_WIDTH
-        world_y = GRID_ORIGIN_Y - (gy - 1) * CHUNK_HEIGHT
-        is_vertical = level_index == 1 and gx % 2 == 0
+        # Add bridge platforms if transitioning to higher Y level
+        if i > 0:
+            prev_gx, prev_gy = layout[i - 1]
+            if gy > prev_gy:
+                add_bridge_platforms(prev_gx, prev_gy, gx, gy, add_platform, placed, surface_type)
+        
+        # Chunk boundaries
+        chunk_left = GRID_ORIGIN_X + (gx - 1) * CHUNK_WIDTH
+        chunk_right = chunk_left + CHUNK_WIDTH
+        chunk_top = GRID_ORIGIN_Y - gy * CHUNK_HEIGHT
+        chunk_bottom = GRID_ORIGIN_Y - (gy - 1) * CHUNK_HEIGHT
+        
+        is_vertical = level_index == 2 and gx % 2 == 0
 
-        if is_vertical:
-            w, h = 18, 160
-            moving = False
-        else:
-            w, h = 160, 18
-            moving = level_index == 0 or i % 3 == 0
+        # Generate multiple platforms per chunk
+        for j in range(PLATFORMS_PER_CHUNK):
+            # Randomize platform position within chunk
+            if is_vertical:
+                w, h = 18, 160
+                moving = False
+                # For vertical platforms, space them vertically in the chunk
+                world_x = chunk_left + random.randint(int(PLATFORM_BUFFER * 0.5), CHUNK_WIDTH - PLATFORM_BUFFER - w)
+                world_y = chunk_top + (j * (CHUNK_HEIGHT // PLATFORMS_PER_CHUNK)) + random.randint(0, 30)
+            else:
+                w, h = 160, 18
+                moving = level_index == 1 or (i + j) % 3 == 0
+                # Distribute platforms throughout the chunk height
+                y_section = (j * CHUNK_HEIGHT // PLATFORMS_PER_CHUNK)
+                world_x = chunk_left + (j * (CHUNK_WIDTH // PLATFORMS_PER_CHUNK)) + random.randint(-30, 30)
+                world_y = chunk_bottom - y_section - random.randint(20, 80)
+            
+            # Ensure within chunk bounds
+            world_x = max(chunk_left + 10, min(world_x, chunk_right - w - 10))
+            world_y = max(chunk_top + 10, min(world_y, chunk_bottom - 10))
+            
+            # Check for collision with existing platforms
+            collision = False
+            for existing_p in placed:
+                if (abs(existing_p.rect.centerx - world_x) < PLATFORM_BUFFER and
+                    abs(existing_p.rect.centery - world_y) < PLATFORM_BUFFER):
+                    collision = True
+                    break
+            
+            if collision:
+                continue
 
-        move_range = (world_x - move_span, world_x + move_span)
-        p = add_platform(
-            world_x,
-            world_y,
-            w,
-            h,
-            moving=moving,
-            move_range=move_range,
-            speed=base_speed,
-            surface_type=surface_type,
-        )
-        placed.append(p)
+            move_range = (world_x - move_span, world_x + move_span)
+            p = add_platform(
+                world_x,
+                world_y,
+                w,
+                h,
+                moving=moving,
+                move_range=move_range,
+                speed=base_speed,
+                surface_type=surface_type,
+            )
+            placed.append(p)
 
     return placed
 
 def initial_platforms():
     platforms = pygame.sprite.Group()
     ground_y = HEIGHT - 40
-    add_platform = make_add_platform(platforms, None)
+    add_platform = make_add_platform(platforms, 0)
     add_platform(PORTAL_X - 60, PORTAL_PLATFORM_Y, 120, 18)
-    add_grid_platforms(None, add_platform, surface_type="normal")
+    grid_platforms = add_grid_platforms(0, add_platform, surface_type="normal")
     # Portal for initial spawn (on starter platform)
     portal = Portal(PORTAL_X, PORTAL_PLATFORM_Y)
     level_length = grid_level_length()
-    # Platform for the end goal flag
-    add_platform(level_length - 150, 300, 200, 18)
-    # Add checkpoints with platforms underneath them
+    
+    # Add checkpoints at grid positions (every 3 grid cells)
     checkpoints = pygame.sprite.Group()
-    for x in range(CHECKPOINT_SPACING, level_length, CHECKPOINT_SPACING):
-        checkpoints.add(Checkpoint(x, ground_y))
-        # Add a platform underneath each checkpoint (20 pixels wide, so make platform slightly wider)
-        add_platform(x - 15, ground_y, 50, 16)
-    return platforms, checkpoints, portal
+    layout = get_level_layout(0)
+    for i, (gx, gy) in enumerate(layout):
+        if i > 0 and i % 3 == 0:  # Every 3rd platform
+            world_x = GRID_ORIGIN_X + (gx - 1) * CHUNK_WIDTH
+            world_y = GRID_ORIGIN_Y - (gy - 1) * CHUNK_HEIGHT
+            # Add platform underneath checkpoint
+            add_platform(world_x - 60, world_y, 120, 18)
+            checkpoints.add(Checkpoint(world_x, world_y))
+    
+    # Create flag at chunk with highest X coordinate
+    max_x_coord = max(layout, key=lambda coord: coord[0])  # Find chunk with max X
+    flag_gx, flag_gy = max_x_coord
+    flag_x = GRID_ORIGIN_X + (flag_gx - 1) * CHUNK_WIDTH + CHUNK_WIDTH // 2
+    # Place at top of chunk (not bottom) - chunk top is at -gy*HEIGHT
+    flag_y = GRID_ORIGIN_Y - flag_gy * CHUNK_HEIGHT + 50  # 50px from top of chunk
+    end_platform = add_platform(flag_x - 100, flag_y, 200, 18)
+    flag = Flag(flag_x, end_platform.rect.top)
+    
+    # Return generated grid coordinates
+    generated_grid_coords = set(layout)
+    return platforms, checkpoints, portal, flag, generated_grid_coords
+
+
+def gen_platforms_grid_aware(platforms, generated_chunks, camera_x, camera_y, level_index=0):
+    """
+    Generate platforms based on grid coordinates, continuing the pattern from LEVEL_GRID_LAYOUTS.
+    Generated_chunks now tracks (gx, gy) tuples instead of linear X indices.
+    """
+    # Determine which grid cells are in view or near the player
+    view_min_gx = max(1, int((camera_x - GEN_BUFFER) / CHUNK_WIDTH))
+    view_max_gx = int((camera_x + WIDTH + GEN_AHEAD) / CHUNK_WIDTH) + 1
+    view_min_gy = max(1, int((camera_y - GEN_BUFFER) / CHUNK_HEIGHT))
+    view_max_gy = int((camera_y + HEIGHT + GEN_AHEAD) / CHUNK_HEIGHT) + 3
+    
+    # Get initial layout
+    layout = get_level_layout(level_index)
+    
+    # Get all existing grid coords
+    existing_coords = set(layout)
+    existing_coords.update(generated_chunks)
+    
+    # Generate next coordinates if we need more
+    max_gx_in_view = view_max_gx
+    all_coords_list = list(existing_coords)
+    
+    # Check if we need to generate more coordinates ahead
+    existing_max_gx = max((gx for gx, gy in all_coords_list), default=0)
+    if max_gx_in_view > existing_max_gx:
+        # Generate more coordinates to fill the view
+        num_needed = max_gx_in_view - existing_max_gx + 5
+        new_coords = get_next_grid_coordinates(all_coords_list, num_needed)
+        existing_coords.update(new_coords)
+        all_coords_list.extend(new_coords)
+    
+    # Place platforms at grid coordinates that are in view and not yet generated
+    add_platform = make_add_platform(platforms, level_index)
+    surface_type = "slippery" if level_index == 4 else "normal"
+    move_span = int(CHUNK_WIDTH * 0.2)
+    base_speed = 1 if surface_type == "slippery" else 2
+    
+    # Sort coordinates by gx to process in order (for bridge platforms)
+    sorted_coords = sorted(all_coords_list, key=lambda coord: coord[0])
+    
+    # Track placed platforms for bridge collision detection
+    placed_platforms = [p for p in platforms]
+    
+    for idx, (gx, gy) in enumerate(sorted_coords):
+        # Skip if outside view range
+        if not (view_min_gx <= gx <= view_max_gx):
+            continue
+        
+        # Skip if already generated
+        if (gx, gy) in generated_chunks:
+            continue
+        
+        # Mark as generated
+        generated_chunks.add((gx, gy))
+        
+        # Add bridge platforms if transitioning to higher Y level
+        if idx > 0:
+            prev_gx, prev_gy = sorted_coords[idx - 1]
+            if gy > prev_gy and (prev_gx, prev_gy) in generated_chunks:
+                # Add bridge platforms between previous and current chunk
+                prev_chunk_right = GRID_ORIGIN_X + prev_gx * CHUNK_WIDTH
+                curr_chunk_left = GRID_ORIGIN_X + (gx - 1) * CHUNK_WIDTH
+                prev_chunk_bottom = GRID_ORIGIN_Y - (prev_gy - 1) * CHUNK_HEIGHT
+                
+                y_diff = gy - prev_gy
+                num_steps = max(3, y_diff * 2)
+                horizontal_gap = curr_chunk_left - prev_chunk_right
+                
+                for step in range(num_steps):
+                    progress = (step + 1) / (num_steps + 1)
+                    bridge_x = prev_chunk_right + (horizontal_gap * progress)
+                    bridge_y = prev_chunk_bottom - (CHUNK_HEIGHT * y_diff * progress) + 50
+                    
+                    # Check collision
+                    collision = False
+                    for p in placed_platforms:
+                        if (abs(p.rect.centerx - bridge_x) < 100 and
+                            abs(p.rect.centery - bridge_y) < 100):
+                            collision = True
+                            break
+                    
+                    if not collision:
+                        new_p = add_platform(bridge_x, bridge_y, 140, 18, moving=False, surface_type=surface_type)
+                        placed_platforms.append(new_p)
+        
+        # Chunk boundaries
+        chunk_left = GRID_ORIGIN_X + (gx - 1) * CHUNK_WIDTH
+        chunk_right = chunk_left + CHUNK_WIDTH
+        chunk_top = GRID_ORIGIN_Y - gy * CHUNK_HEIGHT
+        chunk_bottom = GRID_ORIGIN_Y - (gy - 1) * CHUNK_HEIGHT
+        
+        # Determine platform type based on level
+        is_vertical = level_index == 2 and gx % 2 == 0
+        
+        # Track existing platform positions for collision checking
+        existing_platform_rects = [(p.rect.centerx, p.rect.centery) for p in platforms]
+        
+        # Generate multiple platforms per chunk
+        for j in range(PLATFORMS_PER_CHUNK):
+            if is_vertical:
+                w, h = 18, 160
+                moving = False
+                # For vertical platforms, space them vertically in the chunk
+                world_x = chunk_left + random.randint(int(PLATFORM_BUFFER * 0.5), CHUNK_WIDTH - PLATFORM_BUFFER - w)
+                world_y = chunk_top + (j * (CHUNK_HEIGHT // PLATFORMS_PER_CHUNK)) + random.randint(0, 30)
+            else:
+                w, h = 160, 18
+                moving = level_index == 1 or (gx + j) % 3 == 0
+                # Distribute platforms throughout the chunk height
+                y_section = (j * CHUNK_HEIGHT // PLATFORMS_PER_CHUNK)
+                world_x = chunk_left + (j * (CHUNK_WIDTH // PLATFORMS_PER_CHUNK)) + random.randint(-30, 30)
+                world_y = chunk_bottom - y_section - random.randint(20, 80)
+            
+            # Ensure within chunk bounds
+            world_x = max(chunk_left + 10, min(world_x, chunk_right - w - 10))
+            world_y = max(chunk_top + 10, min(world_y, chunk_bottom - 10))
+            
+            # Check for collision with existing platforms
+            collision = False
+            for px, py in existing_platform_rects:
+                if (abs(px - world_x) < PLATFORM_BUFFER and
+                    abs(py - world_y) < PLATFORM_BUFFER):
+                    collision = True
+                    break
+            
+            if collision:
+                continue
+            
+            move_range = (world_x - move_span, world_x + move_span)
+            add_platform(
+                world_x,
+                world_y,
+                w,
+                h,
+                moving=moving,
+                move_range=move_range,
+                speed=base_speed,
+                surface_type=surface_type,
+            )
+            existing_platform_rects.append((world_x, world_y))
 
 
 def gen_platforms_for_range(platforms, existing_xs, start_x, end_x, player_x, level_length):
@@ -592,26 +844,40 @@ def build_fixed_level(level_index):
     add_platform = make_add_platform(platforms, level_index)
     add_platform(PORTAL_X - 60, PORTAL_PLATFORM_Y, 120, 18)
 
-    surface_type = "slippery" if level_index == 3 else "normal"
+    surface_type = "slippery" if level_index == 4 else "normal"
     grid_platforms = add_grid_platforms(level_index, add_platform, surface_type=surface_type)
-    end_platform = add_platform(level_length - 220, 260, 180, 18, surface_type=surface_type)
+    
+    # Place end platform and flag at chunk with highest X coordinate
+    layout = get_level_layout(level_index)
+    max_x_coord = max(layout, key=lambda coord: coord[0])  # Find chunk with max X
+    flag_gx, flag_gy = max_x_coord
+    flag_x = GRID_ORIGIN_X + (flag_gx - 1) * CHUNK_WIDTH + CHUNK_WIDTH // 2
+    flag_y = GRID_ORIGIN_Y - flag_gy * CHUNK_HEIGHT + 50
+    end_platform = add_platform(flag_x - 100, flag_y, 200, 18, surface_type=surface_type)
 
-    if level_index == 2:
+    if level_index == 3:
         enemy_platforms = [p for p in grid_platforms if p.rect.width >= p.rect.height]
         for p in enemy_platforms[1::3][:5]:
             enemies.add(Enemy(p, speed=2))
 
-    if level_index == 4:
+    if level_index == 5:
         candidates = [p for p in grid_platforms if p.rect.width >= 140]
         for p in candidates[:4]:
             boosts.add(JumpBoost(p))
 
-    for x in range(800, level_length - 200, 800):
-        checkpoints.add(Checkpoint(x, ground_y))
-        add_platform(x - 15, ground_y, 50, 16)
+    # Add checkpoints at grid positions (every 3 grid cells)
+    layout = get_level_layout(level_index)
+    for i, (gx, gy) in enumerate(layout):
+        if i > 0 and i % 3 == 0:  # Every 3rd platform
+            world_x = GRID_ORIGIN_X + (gx - 1) * CHUNK_WIDTH
+            world_y = GRID_ORIGIN_Y - (gy - 1) * CHUNK_HEIGHT
+            # Add platform underneath checkpoint
+            add_platform(world_x - 60, world_y, 120, 18)
+            checkpoints.add(Checkpoint(world_x, world_y))
 
-    flag = Flag(level_length - 50, end_platform.rect.top)
-    return platforms, checkpoints, portal, flag, enemies, boosts, level_length
+    flag = Flag(flag_x, end_platform.rect.top)
+    generated_grid_coords = set(layout)
+    return platforms, checkpoints, portal, flag, enemies, boosts, level_length, generated_grid_coords
 
 # ---- Menu Rendering ----
 def draw_main_menu(screen, menu_selected, pulse_amount):
@@ -619,7 +885,7 @@ def draw_main_menu(screen, menu_selected, pulse_amount):
     title = menu_font.render("Chicken Platformer", True, (0, 0, 0))
     screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 50))
     
-    levels = ["Warmup", "Level 1", "Level 2", "Level 3", "Level 4", "Level 5"]
+    levels = ["Level 1", "Level 2", "Level 3", "Level 4", "Level 5", "Level 6"]
     y_start = 150
     y_step = 60
     
@@ -641,7 +907,7 @@ def draw_win_menu(screen, level_index, elapsed, menu_selected, pulse_amount):
     overlay.fill((0, 0, 0, 150))
     screen.blit(overlay, (0, 0))
     
-    if level_index == 4:
+    if level_index == 5:
         title = big_font.render("All Levels Complete!", True, (255, 255, 255))
     else:
         title = big_font.render("Level Complete!", True, (255, 255, 255))
@@ -651,7 +917,7 @@ def draw_win_menu(screen, level_index, elapsed, menu_selected, pulse_amount):
     screen.blit(time_text, (WIDTH // 2 - time_text.get_width() // 2, 200))
     
     options = ["Next Level", "Main Menu"]
-    if level_index == 4:
+    if level_index == 5:
         options = ["Main Menu"]
     
     y_start = 300
@@ -670,47 +936,35 @@ def draw_win_menu(screen, level_index, elapsed, menu_selected, pulse_amount):
 def main():
     global best_time
     pygame.display.set_caption("Chicken Platformer - Reach the Flag!")
-    level_index = None
+    level_index = 0
     developer_mode = False
     game_state = MENU
     menu_selected = 0
     win_menu_selected = 0
     pulse_timer = 0
-    platforms, checkpoints, portal = initial_platforms()
+    platforms, checkpoints, portal, flag, generated_chunks = initial_platforms()
     enemies = pygame.sprite.Group()
     boosts = pygame.sprite.Group()
-    generated_chunks = set()
     use_procedural = True
     level_length = grid_level_length()
     player = Chicken(PORTAL_X, PORTAL_PLATFORM_Y - 24)
-    flag = Flag(level_length - 50, 300)
     particles = pygame.sprite.Group()
     all_sprites = pygame.sprite.Group()
     all_sprites.add(player)
     last_checkpoint = (PORTAL_X, PORTAL_PLATFORM_Y - 24)
     camera_x = 0
+    camera_y = 0
     start_time = pygame.time.get_ticks()
     won = False
 
     def load_level(new_level_index, spawn_at_checkpoint=False):
         nonlocal level_index, platforms, checkpoints, portal, enemies, boosts, generated_chunks, player, flag
-        nonlocal last_checkpoint, camera_x, start_time, won, use_procedural, level_length
+        nonlocal last_checkpoint, camera_x, camera_y, start_time, won, use_procedural, level_length
 
         level_index = new_level_index
-        if level_index is None:
-            platforms, checkpoints, portal = initial_platforms()
-            enemies = pygame.sprite.Group()
-            boosts = pygame.sprite.Group()
-            use_procedural = True
-            level_length = grid_level_length()
-            flag = Flag(level_length - 50, 300)
-            generated_chunks = set()
-            start_pos = (PORTAL_X, PORTAL_PLATFORM_Y - 24)
-        else:
-            platforms, checkpoints, portal, flag, enemies, boosts, level_length = build_fixed_level(level_index)
-            use_procedural = True
-            generated_chunks = set()
-            start_pos = (PORTAL_X, PORTAL_PLATFORM_Y - 24)
+        platforms, checkpoints, portal, flag, enemies, boosts, level_length, generated_chunks = build_fixed_level(level_index)
+        use_procedural = True
+        start_pos = (PORTAL_X, PORTAL_PLATFORM_Y - 24)
 
         if not spawn_at_checkpoint:
             last_checkpoint = start_pos
@@ -719,8 +973,10 @@ def main():
         player.developer_mode = developer_mode
         if not spawn_at_checkpoint:
             camera_x = 0
+            camera_y = 0
         else:
             camera_x = max(0, player.rect.centerx - WIDTH // CAMERA_OFFSET_X_RATIO)
+            camera_y = max(0, player.rect.centery - HEIGHT // 2)
         start_time = pygame.time.get_ticks()
         won = False
 
@@ -759,17 +1015,17 @@ def main():
                     elif event.key == pygame.K_DOWN:
                         menu_selected = (menu_selected + 1) % 6
                     elif event.key == pygame.K_RETURN:
-                        load_level(menu_selected if menu_selected > 0 else None)
+                        load_level(menu_selected)
                         game_state = PLAYING
                         menu_selected = 0
                 elif game_state == WIN_MENU:
-                    options_count = 1 if (level_index == 4) else 2
+                    options_count = 1 if (level_index == 5) else 2
                     if event.key == pygame.K_UP:
                         win_menu_selected = (win_menu_selected - 1) % options_count
                     elif event.key == pygame.K_DOWN:
                         win_menu_selected = (win_menu_selected + 1) % options_count
                     elif event.key == pygame.K_RETURN:
-                        if level_index == 4:
+                        if level_index == 5:
                             game_state = MENU
                             menu_selected = 0
                         elif win_menu_selected == 0:
@@ -809,20 +1065,23 @@ def main():
                 player.facing_right = True
 
             target_camera_x = player.rect.centerx - WIDTH // CAMERA_OFFSET_X_RATIO
+            target_camera_y = player.rect.centery - HEIGHT // 2
             # Fix #3: Faster smoothing and clamp camera
             camera_x += (target_camera_x - camera_x) * CAMERA_SMOOTHING
             camera_x = max(0, min(camera_x, level_length - WIDTH + 200))
+            camera_y += (target_camera_y - camera_y) * CAMERA_SMOOTHING
+            # No clamping - allow camera to follow player infinitely up and down
 
-            gen_start = camera_x
-            gen_end = camera_x + GEN_AHEAD
-
+            # Generate platforms using grid-aware system
             if use_procedural:
-                gen_platforms_for_range(platforms, generated_chunks, int(gen_start), int(gen_end), player.rect.centerx, level_length)
+                gen_platforms_grid_aware(platforms, generated_chunks, camera_x, camera_y, level_index)
 
             for p in list(platforms):
                 p.update(camera_x)
                 if use_procedural:
-                    if p.rect.right < camera_x - GEN_BUFFER and p.rect.height != 40:
+                    # Remove platforms outside the viewport (considering both X and Y)
+                    if (p.rect.right < camera_x - GEN_BUFFER or 
+                        p.rect.top > camera_y + HEIGHT + GEN_BUFFER) and p.rect.height != 40:
                         platforms.remove(p)
 
             for e in enemies:
@@ -837,13 +1096,10 @@ def main():
             for cp in checkpoints:
                 if not cp.activated and player.rect.centerx > cp.x:
                     cp.activate()   
-                    last_checkpoint = (cp.x, HEIGHT - 120)
+                    last_checkpoint = (cp.x, cp.y)
 
             if player.rect.colliderect(flag.rect) and not won:
-                if level_index is None:
-                    load_level(0, spawn_at_checkpoint=False)
-                    continue
-                if level_index < 4:
+                if level_index < 5:
                     load_level(level_index + 1, spawn_at_checkpoint=False)
                     continue
                 won = True
@@ -863,26 +1119,24 @@ def main():
             screen.fill(BG_COLOR)
             for i in range(6):
                 cx = (i * CLOUD_SPACING - camera_x * 0.2) % (WIDTH + 200) - 100
-                pygame.draw.ellipse(screen, (255, 255, 255, 180), (cx, CLOUD_Y_OFFSET + (i % 3) * CLOUD_Y_STEP, CLOUD_WIDTH, CLOUD_HEIGHT))
+                cy = CLOUD_Y_OFFSET + (i % 3) * CLOUD_Y_STEP - camera_y * 0.3
+                pygame.draw.ellipse(screen, (255, 255, 255, 180), (cx, cy, CLOUD_WIDTH, CLOUD_HEIGHT))
             for p in platforms:
-                screen.blit(p.image, (p.rect.x - camera_x, p.rect.y))
+                screen.blit(p.image, (p.rect.x - camera_x, p.rect.y - camera_y))
             for cp in checkpoints:
-                screen.blit(cp.image, (cp.rect.x - camera_x, cp.rect.y))
-            screen.blit(portal.image, (portal.rect.x - camera_x, portal.rect.y))
-            screen.blit(flag.image, (flag.rect.x - camera_x, flag.rect.y))
+                screen.blit(cp.image, (cp.rect.x - camera_x, cp.rect.y - camera_y))
+            screen.blit(portal.image, (portal.rect.x - camera_x, portal.rect.y - camera_y))
+            screen.blit(flag.image, (flag.rect.x - camera_x, flag.rect.y - camera_y))
             for e in enemies:
-                screen.blit(e.image, (e.rect.x - camera_x, e.rect.y))
+                screen.blit(e.image, (e.rect.x - camera_x, e.rect.y - camera_y))
             for b in boosts:
-                screen.blit(b.image, (b.rect.x - camera_x, b.rect.y))
+                screen.blit(b.image, (b.rect.x - camera_x, b.rect.y - camera_y))
             for p in particles:
-                screen.blit(p.image, (p.rect.x - camera_x, p.rect.y))
-            screen.blit(player.image, (player.rect.x - camera_x, player.rect.y))
+                screen.blit(p.image, (p.rect.x - camera_x, p.rect.y - camera_y))
+            screen.blit(player.image, (player.rect.x - camera_x, player.rect.y - camera_y))
 
             elapsed = (pygame.time.get_ticks() - start_time) // 1000
-            if level_index is None:
-                level_text = "Warmup"
-            else:
-                level_text = f"Level {level_index + 1}/5"
+            level_text = f"Level {level_index + 1}/6"
             dev_text = "  DevMode" if developer_mode else ""
             info = font.render(f"{level_text}  Time {elapsed}s  Best {best_time if best_time != float('inf') else '-'}s  X {player.rect.centerx}{dev_text}  Press R to restart  Esc to quit", True, (30, 30, 30))
             screen.blit(info, (14, 14))
