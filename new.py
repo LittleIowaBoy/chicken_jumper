@@ -8,7 +8,7 @@ import random
 import math
 
 # ---- Config ----
-WIDTH, HEIGHT = 900, 600
+WIDTH, HEIGHT = 1600, 1000
 FPS = 60
 GRAVITY = 0.8
 PLAYER_SPEED = 4.5
@@ -21,7 +21,6 @@ ENEMY_COLOR = (180, 40, 40)
 BG_COLOR = (135, 206, 235)  # Sky blue
 GEN_AHEAD = 1400  # Pixels ahead of camera to generate platforms
 GEN_BUFFER = 400  # Keep platforms behind this distance before removing
-LEVEL_LENGTH = 14200  # Legacy length; use grid_level_length() for grid-based levels
 SLIPPERY_ACCEL = 0.35
 BOOST_JUMP_MULT = 1.5
 SLIP_SHORT_MS = 200
@@ -39,10 +38,10 @@ PARTICLE_LIFETIME = 20
 CHECKPOINT_SPACING = 1000
 
 # Platform generation
-CHUNK_WIDTH = 700
-CHUNK_HEIGHT = 400  # Increased for 20x20 grid
-PLATFORMS_PER_CHUNK = 12
-PLATFORM_BUFFER = 150
+CHUNK_WIDTH = 800
+CHUNK_HEIGHT = 800  # Doubled for better vertical spread
+PLATFORMS_PER_CHUNK = 60 
+PLATFORM_BUFFER = 150  # Increased for better spacing
 LEVEL_CHUNKS_X = 20
 LEVEL_CHUNKS_Y = 20  # 20x20 background grid
 
@@ -99,7 +98,7 @@ class Particle(pygame.sprite.Sprite):
 
 # ---- Helper Classes ----
 class Platform(pygame.sprite.Sprite):
-    def __init__(self, x, y, w, h, moving=False, move_range=(0, 0), speed=0, surface_type="normal", slip_duration_ms=None):
+    def __init__(self, x, y, w, h, moving=False, move_range=(0, 0), speed=0, surface_type="normal", slip_duration_ms=None, initial_direction=1):
         super().__init__()
         self.image = pygame.Surface((w, h))
         self.surface_type = surface_type
@@ -112,7 +111,7 @@ class Platform(pygame.sprite.Sprite):
         self.moving = moving
         self.speed = speed
         self.move_range = move_range
-        self.direction = 1
+        self.direction = initial_direction
         if self.surface_type == "slippery":
             if slip_duration_ms is None:
                 self.slip_duration_ms = random.choice([SLIP_SHORT_MS, SLIP_MEDIUM_MS, SLIP_LONG_MS])
@@ -191,13 +190,70 @@ class Enemy(pygame.sprite.Sprite):
         self.speed = speed
         self.min_x = platform.rect.left + 6
         self.max_x = platform.rect.right - 6
+        self.paused = False
+        self.pause_end_time = 0
+        self.pause_duration = 2000  # 2 seconds in milliseconds
 
     def update(self):
-        self.rect.x += self.direction * self.speed
-        if self.rect.left < self.min_x or self.rect.right > self.max_x:
-            self.direction *= -1
+        current_time = pygame.time.get_ticks()
+        
+        # If paused, check if pause time has elapsed
+        if self.paused:
+            if current_time >= self.pause_end_time:
+                self.paused = False
+                self.direction *= -1  # Change direction after pause
+        else:
+            # Move the enemy
             self.rect.x += self.direction * self.speed
+            # Check if reached platform edge
+            if self.rect.left <= self.min_x or self.rect.right >= self.max_x:
+                # Clamp position to edge
+                if self.rect.left <= self.min_x:
+                    self.rect.left = self.min_x
+                else:
+                    self.rect.right = self.max_x
+                # Start pause
+                self.paused = True
+                self.pause_end_time = current_time + self.pause_duration
+        
         self.rect.bottom = self.platform.rect.top
+
+class Orb(pygame.sprite.Sprite):
+    def __init__(self, center_x, center_y, radius=80, speed=0.02):
+        super().__init__()
+        self.center_x = center_x
+        self.center_y = center_y
+        self.radius = radius
+        self.speed = speed
+        self.angle = random.uniform(0, 2 * math.pi)  # Random starting angle
+        self.glow_phase = 0
+        self.image = pygame.Surface((32, 32), pygame.SRCALPHA)
+        self.draw_orb()
+        self.rect = self.image.get_rect(center=(center_x, center_y))
+
+    def draw_orb(self):
+        self.image.fill((0, 0, 0, 0))
+        # Outer glow
+        glow_intensity = int(100 + 50 * abs(math.sin(self.glow_phase)))
+        pygame.draw.circle(self.image, (255, glow_intensity, 0, 180), (16, 16), 14)
+        # Inner core
+        pygame.draw.circle(self.image, (255, 200, 50), (16, 16), 10)
+        pygame.draw.circle(self.image, (255, 255, 150), (16, 16), 6)
+
+    def update(self):
+        # Move in circular motion
+        self.angle += self.speed
+        if self.angle > 2 * math.pi:
+            self.angle -= 2 * math.pi
+        
+        # Calculate position on circle
+        x = self.center_x + self.radius * math.cos(self.angle)
+        y = self.center_y + self.radius * math.sin(self.angle)
+        self.rect.center = (int(x), int(y))
+        
+        # Update glow animation
+        self.glow_phase += 0.1
+        self.draw_orb()
 
 class JumpBoost(pygame.sprite.Sprite):
     def __init__(self, platform):
@@ -443,10 +499,10 @@ def level_scale_for_index(level_index):
 def make_add_platform(platforms, level_index):
     level_scale = level_scale_for_index(level_index)
 
-    def add_platform(x, y, w, h, moving=False, move_range=(0, 0), speed=0, surface_type="normal"):
+    def add_platform(x, y, w, h, moving=False, move_range=(0, 0), speed=0, surface_type="normal", initial_direction=1):
         sw = max(12, int(w * level_scale))
         sh = max(12, int(h * level_scale))
-        p = Platform(x, y, sw, sh, moving=moving, move_range=move_range, speed=speed, surface_type=surface_type)
+        p = Platform(x, y, sw, sh, moving=moving, move_range=move_range, speed=speed, surface_type=surface_type, initial_direction=initial_direction)
         platforms.add(p)
         return p
 
@@ -485,97 +541,199 @@ def get_next_grid_coordinates(existing_coords, num_to_generate=5):
     
     return new_coords
 
-def add_bridge_platforms(prev_gx, prev_gy, curr_gx, curr_gy, add_platform, placed, surface_type="normal"):
-    """Add bridge platforms between chunks at different Y levels"""
-    if prev_gy >= curr_gy:
-        return  # No bridge needed for same level or going down
+def check_platform_collision(x1, y1, w1, h1, moving1, move_range1, x2, y2, w2, h2, moving2, move_range2):
+    """
+    Check if two platforms will collide, accounting for movement ranges.
     
-    y_diff = curr_gy - prev_gy
-    if y_diff == 0:
-        return
+    Positions (x1, y1, x2, y2) are topleft coordinates to match Platform.rect positioning.
+    For moving platforms, checks if their full movement ranges overlap.
+    Returns True if collision detected, False otherwise.
+    """
+    # Calculate effective bounds for each platform (topleft-based)
+    if moving1 and move_range1:
+        # move_range contains min and max left edge positions
+        left1 = move_range1[0]
+        right1 = move_range1[1] + w1
+    else:
+        left1 = x1
+        right1 = x1 + w1
     
-    # Calculate positions
-    prev_chunk_right = GRID_ORIGIN_X + prev_gx * CHUNK_WIDTH
-    curr_chunk_left = GRID_ORIGIN_X + (curr_gx - 1) * CHUNK_WIDTH
-    prev_chunk_bottom = GRID_ORIGIN_Y - (prev_gy - 1) * CHUNK_HEIGHT
-    curr_chunk_bottom = GRID_ORIGIN_Y - (curr_gy - 1) * CHUNK_HEIGHT
+    if moving2 and move_range2:
+        # move_range contains min and max left edge positions
+        left2 = move_range2[0]
+        right2 = move_range2[1] + w2
+    else:
+        left2 = x2
+        right2 = x2 + w2
     
-    # Create stepping stones from prev chunk to current chunk
-    num_steps = max(3, y_diff * 2)  # At least 3 steps, more for larger gaps
-    horizontal_gap = curr_chunk_left - prev_chunk_right
+    # Vertical bounds (platforms don't move vertically, topleft-based)
+    top1 = y1
+    bottom1 = y1 + h1
+    top2 = y2
+    bottom2 = y2 + h2
     
-    for step in range(num_steps):
-        # Interpolate position between chunks
-        progress = (step + 1) / (num_steps + 1)
-        x = prev_chunk_right + (horizontal_gap * progress)
-        y = prev_chunk_bottom - (CHUNK_HEIGHT * y_diff * progress) + 50
-        
-        # Check for collision with existing platforms
-        collision = False
-        for existing_p in placed:
-            if (abs(existing_p.rect.centerx - x) < 100 and
-                abs(existing_p.rect.centery - y) < 100):
-                collision = True
-                break
-        
-        if not collision:
-            p = add_platform(x, y, 140, 18, moving=False, surface_type=surface_type)
-            placed.append(p)
+    # Check for overlap with safety margins
+    horizontal_safety = PLATFORM_BUFFER  # Use full platform buffer for horizontal spacing
+    vertical_safety = 80  # Player height (48px) + comfortable margin for climbing
+    
+    horizontal_overlap = not (right1 + horizontal_safety < left2 or right2 + horizontal_safety < left1)
+    vertical_overlap = not (bottom1 + vertical_safety < top2 or bottom2 + vertical_safety < top1)
+    
+    return horizontal_overlap and vertical_overlap
 
-def add_grid_platforms(level_index, add_platform, surface_type="normal"):
+def has_platform_collision(world_x, world_y, w, h, moving, move_range, check_against_dicts, check_against_sprites):
+    """
+    Helper function to check if a platform at given position collides with existing platforms.
+    
+    Args:
+        world_x, world_y: Position of new platform (topleft)
+        w, h: Dimensions of new platform
+        moving: Whether new platform moves
+        move_range: Movement range tuple for new platform
+        check_against_dicts: List of dicts with platform data ({'x', 'y', 'w', 'h', 'moving', 'move_range'})
+        check_against_sprites: List of platform sprites (with rect, moving, move_range attributes)
+    
+    Returns:
+        True if collision detected, False otherwise
+    """
+    # Check against dict-based platform data
+    for pdata in check_against_dicts:
+        if check_platform_collision(
+            world_x, world_y, w, h, moving, move_range,
+            pdata['x'], pdata['y'], pdata['w'], pdata['h'],
+            pdata['moving'], pdata['move_range']
+        ):
+            return True
+    
+    # Check against sprite-based platforms
+    for existing_p in check_against_sprites:
+        if check_platform_collision(
+            world_x, world_y, w, h, moving, move_range,
+            existing_p.rect.x, existing_p.rect.y,
+            existing_p.rect.width, existing_p.rect.height,
+            existing_p.moving, existing_p.move_range
+        ):
+            return True
+    
+    return False
+
+def get_chunk_boundaries(gx, gy):
+    """
+    Calculate chunk boundaries for given grid coordinates.
+    
+    Args:
+        gx, gy: Grid coordinates (1-indexed)
+    
+    Returns:
+        Tuple of (chunk_left, chunk_right, chunk_top, chunk_bottom)
+    """
+    chunk_left = GRID_ORIGIN_X + (gx - 1) * CHUNK_WIDTH
+    chunk_right = chunk_left + CHUNK_WIDTH
+    chunk_top = GRID_ORIGIN_Y - gy * CHUNK_HEIGHT
+    chunk_bottom = GRID_ORIGIN_Y - (gy - 1) * CHUNK_HEIGHT
+    return chunk_left, chunk_right, chunk_top, chunk_bottom
+
+def add_grid_platforms(level_index, add_platform, surface_type="normal", existing_platforms=None):
+    """
+    Generate grid-based platforms for a level.
+    
+    Args:
+        level_index: Index of the level
+        add_platform: Function to add platforms to sprite group
+        surface_type: Type of surface ("normal" or "slippery")
+        existing_platforms: Optional sprite group of platforms to check collisions against
+    """
     placed = []
     layout = get_level_layout(level_index)
     move_span = int(CHUNK_WIDTH * 0.2)
     base_speed = 1 if surface_type == "slippery" else 2
+    
+    # Build initial collision check list from existing platforms
+    initial_check_list = []
+    if existing_platforms:
+        for p in existing_platforms:
+            initial_check_list.append({
+                'platform': p,
+                'x': p.rect.x,
+                'y': p.rect.y,
+                'w': p.rect.width,
+                'h': p.rect.height,
+                'moving': p.moving,
+                'move_range': p.move_range
+            })
 
     for i, (gx, gy) in enumerate(layout):
-        # Add bridge platforms if transitioning to higher Y level
-        if i > 0:
-            prev_gx, prev_gy = layout[i - 1]
-            if gy > prev_gy:
-                add_bridge_platforms(prev_gx, prev_gy, gx, gy, add_platform, placed, surface_type)
-        
         # Chunk boundaries
-        chunk_left = GRID_ORIGIN_X + (gx - 1) * CHUNK_WIDTH
-        chunk_right = chunk_left + CHUNK_WIDTH
-        chunk_top = GRID_ORIGIN_Y - gy * CHUNK_HEIGHT
-        chunk_bottom = GRID_ORIGIN_Y - (gy - 1) * CHUNK_HEIGHT
+        chunk_left, chunk_right, chunk_top, chunk_bottom = get_chunk_boundaries(gx, gy)
         
         is_vertical = level_index == 2 and gx % 2 == 0
 
         # Generate multiple platforms per chunk
+        chunk_center_y = (chunk_top + chunk_bottom) / 2
         for j in range(PLATFORMS_PER_CHUNK):
             # Randomize platform position within chunk
             if is_vertical:
                 w, h = 18, 160
                 moving = False
-                # For vertical platforms, space them vertically in the chunk
-                world_x = chunk_left + random.randint(int(PLATFORM_BUFFER * 0.5), CHUNK_WIDTH - PLATFORM_BUFFER - w)
-                world_y = chunk_top + (j * (CHUNK_HEIGHT // PLATFORMS_PER_CHUNK)) + random.randint(0, 30)
+                # For vertical platforms, distribute across chunk with more variation
+                world_x = chunk_left + random.randint(int(PLATFORM_BUFFER * 0.3), CHUNK_WIDTH - int(PLATFORM_BUFFER * 0.7) - w)
+                # Use full chunk height with random distribution
+                world_y = chunk_top + random.randint(h, CHUNK_HEIGHT - h)
             else:
                 w, h = 160, 18
                 moving = level_index == 1 or (i + j) % 3 == 0
-                # Distribute platforms throughout the chunk height
-                y_section = (j * CHUNK_HEIGHT // PLATFORMS_PER_CHUNK)
-                world_x = chunk_left + (j * (CHUNK_WIDTH // PLATFORMS_PER_CHUNK)) + random.randint(-30, 30)
-                world_y = chunk_bottom - y_section - random.randint(20, 80)
+                # Gradient distribution: cluster around middle with diminishing density toward edges
+                # Use Gaussian distribution for Y position (cluster around center)
+                offset_from_center = random.gauss(0, CHUNK_HEIGHT * 0.25)
+                world_y = chunk_center_y + offset_from_center
+                # X position: distribute horizontally with variation
+                x_base = chunk_left + (j * (CHUNK_WIDTH // PLATFORMS_PER_CHUNK))
+                world_x = x_base + random.randint(-50, 50)
             
-            # Ensure within chunk bounds
-            world_x = max(chunk_left + 10, min(world_x, chunk_right - w - 10))
-            world_y = max(chunk_top + 10, min(world_y, chunk_bottom - 10))
+            # Allow 50% overlap beyond chunk bounds
+            world_x = max(chunk_left - w//2, min(world_x, chunk_right + w//2 - w))
+            world_y = max(chunk_top - h//2, min(world_y, chunk_bottom + h//2 - h))
             
             # Check for collision with existing platforms
-            collision = False
-            for existing_p in placed:
-                if (abs(existing_p.rect.centerx - world_x) < PLATFORM_BUFFER and
-                    abs(existing_p.rect.centery - world_y) < PLATFORM_BUFFER):
-                    collision = True
-                    break
-            
-            if collision:
-                continue
-
             move_range = (world_x - move_span, world_x + move_span)
+            if has_platform_collision(world_x, world_y, w, h, moving, move_range, initial_check_list, placed):
+                continue
+            # Randomize speed and direction for moving platforms
+            random_speed = random.uniform(1.0, 3.5) if moving else base_speed
+            random_direction = random.choice([-1, 1]) if moving else 1
+            p = add_platform(
+                world_x,
+                world_y,
+                w,
+                h,
+                moving=moving,
+                move_range=move_range,
+                speed=random_speed,
+                surface_type=surface_type,
+                initial_direction=random_direction,
+            )
+            placed.append(p)
+        
+        # Add extra platforms in top-right quarter for easier climbing
+        # Top-right quarter: right half horizontally, top half vertically
+        top_right_count = 12
+        for k in range(top_right_count):
+            w, h = 140, 18
+            moving = False
+            # X position: right half of chunk
+            world_x = chunk_left + CHUNK_WIDTH * 0.5 + random.randint(0, int(CHUNK_WIDTH * 0.5) - w)
+            # Y position: top half of chunk
+            world_y = chunk_top + random.randint(20, int(CHUNK_HEIGHT * 0.5))
+            
+            # Allow 50% overlap beyond chunk bounds
+            world_x = max(chunk_left - w//2, min(world_x, chunk_right + w//2 - w))
+            world_y = max(chunk_top - h//2, min(world_y, chunk_bottom + h//2 - h))
+            
+            # Check for collision
+            move_range = (world_x - move_span, world_x + move_span)
+            if has_platform_collision(world_x, world_y, w, h, moving, move_range, initial_check_list, placed):
+                continue
+            
             p = add_platform(
                 world_x,
                 world_y,
@@ -587,15 +745,50 @@ def add_grid_platforms(level_index, add_platform, surface_type="normal"):
                 surface_type=surface_type,
             )
             placed.append(p)
+        
+        # Add extra platforms in bottom-left quarter for chunks after the first
+        # Bottom-left quarter: left half horizontally, bottom half vertically
+        if i > 0:  # Skip first chunk
+            bottom_left_count = 10
+            for k in range(bottom_left_count):
+                w, h = 140, 18
+                moving = False
+                # X position: left half of chunk
+                world_x = chunk_left + random.randint(0, int(CHUNK_WIDTH * 0.5) - w)
+                # Y position: bottom half of chunk
+                world_y = chunk_top + CHUNK_HEIGHT * 0.5 + random.randint(0, int(CHUNK_HEIGHT * 0.5) - h)
+                
+                # Allow 50% overlap beyond chunk bounds
+                world_x = max(chunk_left - w//2, min(world_x, chunk_right + w//2 - w))
+                world_y = max(chunk_top - h//2, min(world_y, chunk_bottom + h//2 - h))
+                
+                # Check for collision
+                move_range = (world_x - move_span, world_x + move_span)
+                if has_platform_collision(world_x, world_y, w, h, moving, move_range, initial_check_list, placed):
+                    continue
+                
+                move_range = (world_x - move_span, world_x + move_span)
+                p = add_platform(
+                    world_x,
+                    world_y,
+                    w,
+                    h,
+                    moving=moving,
+                    move_range=move_range,
+                    speed=base_speed,
+                    surface_type=surface_type,
+                )
+                placed.append(p)
 
     return placed
 
 def initial_platforms():
     platforms = pygame.sprite.Group()
-    ground_y = HEIGHT - 40
     add_platform = make_add_platform(platforms, 0)
-    add_platform(PORTAL_X - 60, PORTAL_PLATFORM_Y, 120, 18)
-    grid_platforms = add_grid_platforms(0, add_platform, surface_type="normal")
+    # Add portal platform first
+    portal_platform = add_platform(PORTAL_X - 60, PORTAL_PLATFORM_Y, 120, 18)
+    # Generate grid platforms, checking collision with portal platform
+    grid_platforms = add_grid_platforms(0, add_platform, surface_type="normal", existing_platforms=platforms)
     # Portal for initial spawn (on starter platform)
     portal = Portal(PORTAL_X, PORTAL_PLATFORM_Y)
     level_length = grid_level_length()
@@ -607,9 +800,27 @@ def initial_platforms():
         if i > 0 and i % 3 == 0:  # Every 3rd platform
             world_x = GRID_ORIGIN_X + (gx - 1) * CHUNK_WIDTH
             world_y = GRID_ORIGIN_Y - (gy - 1) * CHUNK_HEIGHT
+            
+            # Check for collision before adding checkpoint platform
+            checkpoint_x = world_x - 60
+            checkpoint_y = world_y
+            checkpoint_w = 120
+            checkpoint_h = 18
+            collision = False
+            for p in platforms:
+                if check_platform_collision(
+                    checkpoint_x, checkpoint_y, checkpoint_w, checkpoint_h, False, None,
+                    p.rect.x, p.rect.y, p.rect.width, p.rect.height,
+                    p.moving, p.move_range
+                ):
+                    collision = True
+                    # Adjust position upward to avoid collision
+                    checkpoint_y -= 100
+                    break
+            
             # Add platform underneath checkpoint
-            add_platform(world_x - 60, world_y, 120, 18)
-            checkpoints.add(Checkpoint(world_x, world_y))
+            add_platform(checkpoint_x, checkpoint_y, checkpoint_w, checkpoint_h)
+            checkpoints.add(Checkpoint(world_x, checkpoint_y))
     
     # Create flag at chunk with highest X coordinate
     max_x_coord = max(layout, key=lambda coord: coord[0])  # Find chunk with max X
@@ -617,7 +828,25 @@ def initial_platforms():
     flag_x = GRID_ORIGIN_X + (flag_gx - 1) * CHUNK_WIDTH + CHUNK_WIDTH // 2
     # Place at top of chunk (not bottom) - chunk top is at -gy*HEIGHT
     flag_y = GRID_ORIGIN_Y - flag_gy * CHUNK_HEIGHT + 50  # 50px from top of chunk
-    end_platform = add_platform(flag_x - 100, flag_y, 200, 18)
+    
+    # Check for collision before adding flag platform
+    flag_platform_x = flag_x - 100
+    flag_platform_y = flag_y
+    flag_platform_w = 200
+    flag_platform_h = 18
+    collision = False
+    for p in platforms:
+        if check_platform_collision(
+            flag_platform_x, flag_platform_y, flag_platform_w, flag_platform_h, False, None,
+            p.rect.x, p.rect.y, p.rect.width, p.rect.height,
+            p.moving, p.move_range
+        ):
+            collision = True
+            # Adjust position upward to avoid collision
+            flag_platform_y -= 100
+            break
+    
+    end_platform = add_platform(flag_platform_x, flag_platform_y, flag_platform_w, flag_platform_h)
     flag = Flag(flag_x, end_platform.rect.top)
     
     # Return generated grid coordinates
@@ -662,10 +891,10 @@ def gen_platforms_grid_aware(platforms, generated_chunks, camera_x, camera_y, le
     move_span = int(CHUNK_WIDTH * 0.2)
     base_speed = 1 if surface_type == "slippery" else 2
     
-    # Sort coordinates by gx to process in order (for bridge platforms)
+    # Sort coordinates by gx to process in order
     sorted_coords = sorted(all_coords_list, key=lambda coord: coord[0])
     
-    # Track placed platforms for bridge collision detection
+    # Track placed platforms for collision detection
     placed_platforms = [p for p in platforms]
     
     for idx, (gx, gy) in enumerate(sorted_coords):
@@ -680,80 +909,98 @@ def gen_platforms_grid_aware(platforms, generated_chunks, camera_x, camera_y, le
         # Mark as generated
         generated_chunks.add((gx, gy))
         
-        # Add bridge platforms if transitioning to higher Y level
-        if idx > 0:
-            prev_gx, prev_gy = sorted_coords[idx - 1]
-            if gy > prev_gy and (prev_gx, prev_gy) in generated_chunks:
-                # Add bridge platforms between previous and current chunk
-                prev_chunk_right = GRID_ORIGIN_X + prev_gx * CHUNK_WIDTH
-                curr_chunk_left = GRID_ORIGIN_X + (gx - 1) * CHUNK_WIDTH
-                prev_chunk_bottom = GRID_ORIGIN_Y - (prev_gy - 1) * CHUNK_HEIGHT
-                
-                y_diff = gy - prev_gy
-                num_steps = max(3, y_diff * 2)
-                horizontal_gap = curr_chunk_left - prev_chunk_right
-                
-                for step in range(num_steps):
-                    progress = (step + 1) / (num_steps + 1)
-                    bridge_x = prev_chunk_right + (horizontal_gap * progress)
-                    bridge_y = prev_chunk_bottom - (CHUNK_HEIGHT * y_diff * progress) + 50
-                    
-                    # Check collision
-                    collision = False
-                    for p in placed_platforms:
-                        if (abs(p.rect.centerx - bridge_x) < 100 and
-                            abs(p.rect.centery - bridge_y) < 100):
-                            collision = True
-                            break
-                    
-                    if not collision:
-                        new_p = add_platform(bridge_x, bridge_y, 140, 18, moving=False, surface_type=surface_type)
-                        placed_platforms.append(new_p)
-        
         # Chunk boundaries
-        chunk_left = GRID_ORIGIN_X + (gx - 1) * CHUNK_WIDTH
-        chunk_right = chunk_left + CHUNK_WIDTH
-        chunk_top = GRID_ORIGIN_Y - gy * CHUNK_HEIGHT
-        chunk_bottom = GRID_ORIGIN_Y - (gy - 1) * CHUNK_HEIGHT
+        chunk_left, chunk_right, chunk_top, chunk_bottom = get_chunk_boundaries(gx, gy)
         
         # Determine platform type based on level
         is_vertical = level_index == 2 and gx % 2 == 0
         
-        # Track existing platform positions for collision checking
-        existing_platform_rects = [(p.rect.centerx, p.rect.centery) for p in platforms]
+        # Multi-chunk overlap tracking: Check collisions against ALL existing platforms
+        # This includes platforms from adjacent chunks that may extend into this chunk
+        # Store platform info as dict for advanced collision detection
+        existing_platform_data = []
+        for p in platforms:
+            existing_platform_data.append({
+                'x': p.rect.x,
+                'y': p.rect.y,
+                'w': p.rect.width,
+                'h': p.rect.height,
+                'moving': p.moving,
+                'move_range': p.move_range
+            })
         
         # Generate multiple platforms per chunk
+        chunk_center_y = (chunk_top + chunk_bottom) / 2
         for j in range(PLATFORMS_PER_CHUNK):
             if is_vertical:
                 w, h = 18, 160
                 moving = False
-                # For vertical platforms, space them vertically in the chunk
-                world_x = chunk_left + random.randint(int(PLATFORM_BUFFER * 0.5), CHUNK_WIDTH - PLATFORM_BUFFER - w)
-                world_y = chunk_top + (j * (CHUNK_HEIGHT // PLATFORMS_PER_CHUNK)) + random.randint(0, 30)
+                # For vertical platforms, distribute across chunk with more variation
+                world_x = chunk_left + random.randint(int(PLATFORM_BUFFER * 0.3), CHUNK_WIDTH - int(PLATFORM_BUFFER * 0.7) - w)
+                # Use full chunk height with random distribution
+                world_y = chunk_top + random.randint(h, CHUNK_HEIGHT - h)
             else:
                 w, h = 160, 18
                 moving = level_index == 1 or (gx + j) % 3 == 0
-                # Distribute platforms throughout the chunk height
-                y_section = (j * CHUNK_HEIGHT // PLATFORMS_PER_CHUNK)
-                world_x = chunk_left + (j * (CHUNK_WIDTH // PLATFORMS_PER_CHUNK)) + random.randint(-30, 30)
-                world_y = chunk_bottom - y_section - random.randint(20, 80)
+                # Gradient distribution: cluster around middle with diminishing density toward edges
+                # Use Gaussian distribution for Y position (cluster around center)
+                offset_from_center = random.gauss(0, CHUNK_HEIGHT * 0.25)
+                world_y = chunk_center_y + offset_from_center
+                # X position: distribute horizontally with variation
+                x_base = chunk_left + (j * (CHUNK_WIDTH // PLATFORMS_PER_CHUNK))
+                world_x = x_base + random.randint(-50, 50)
             
-            # Ensure within chunk bounds
-            world_x = max(chunk_left + 10, min(world_x, chunk_right - w - 10))
-            world_y = max(chunk_top + 10, min(world_y, chunk_bottom - 10))
+            # Allow 50% overlap beyond chunk bounds
+            world_x = max(chunk_left - w//2, min(world_x, chunk_right + w//2 - w))
+            world_y = max(chunk_top - h//2, min(world_y, chunk_bottom + h//2 - h))
             
             # Check for collision with existing platforms
-            collision = False
-            for px, py in existing_platform_rects:
-                if (abs(px - world_x) < PLATFORM_BUFFER and
-                    abs(py - world_y) < PLATFORM_BUFFER):
-                    collision = True
-                    break
+            move_range = (world_x - move_span, world_x + move_span)
+            if has_platform_collision(world_x, world_y, w, h, moving, move_range, existing_platform_data, []):
+                continue
+            # Randomize speed and direction for moving platforms
+            random_speed = random.uniform(1.0, 3.5) if moving else base_speed
+            random_direction = random.choice([-1, 1]) if moving else 1
+            add_platform(
+                world_x,
+                world_y,
+                w,
+                h,
+                moving=moving,
+                move_range=move_range,
+                speed=random_speed,
+                surface_type=surface_type,
+                initial_direction=random_direction,
+            )
+            existing_platform_data.append({
+                'x': world_x,
+                'y': world_y,
+                'w': w,
+                'h': h,
+                'moving': moving,
+                'move_range': move_range
+            })
+        
+        # Add extra platforms in top-right quarter for easier climbing
+        # Top-right quarter: right half horizontally, top half vertically
+        top_right_count = 12
+        for k in range(top_right_count):
+            w, h = 140, 18
+            moving = False
+            # X position: right half of chunk
+            world_x = chunk_left + CHUNK_WIDTH * 0.5 + random.randint(0, int(CHUNK_WIDTH * 0.5) - w)
+            # Y position: top half of chunk
+            world_y = chunk_top + random.randint(20, int(CHUNK_HEIGHT * 0.5))
             
-            if collision:
+            # Allow 50% overlap beyond chunk bounds
+            world_x = max(chunk_left - w//2, min(world_x, chunk_right + w//2 - w))
+            world_y = max(chunk_top - h//2, min(world_y, chunk_bottom + h//2 - h))
+            
+            # Check for collision
+            move_range = (world_x - move_span, world_x + move_span)
+            if has_platform_collision(world_x, world_y, w, h, moving, move_range, existing_platform_data, []):
                 continue
             
-            move_range = (world_x - move_span, world_x + move_span)
             add_platform(
                 world_x,
                 world_y,
@@ -764,88 +1011,72 @@ def gen_platforms_grid_aware(platforms, generated_chunks, camera_x, camera_y, le
                 speed=base_speed,
                 surface_type=surface_type,
             )
-            existing_platform_rects.append((world_x, world_y))
+            existing_platform_data.append({
+                'x': world_x,
+                'y': world_y,
+                'w': w,
+                'h': h,
+                'moving': moving,
+                'move_range': move_range
+            })
+        
+        # Add extra platforms in bottom-left quarter for chunks after the first
+        # Bottom-left quarter: left half horizontally, bottom half vertically
+        if gx > 1:  # Skip first chunk (gx=1)
+            bottom_left_count = 10
+            for k in range(bottom_left_count):
+                w, h = 140, 18
+                moving = False
+                # X position: left half of chunk
+                world_x = chunk_left + random.randint(0, int(CHUNK_WIDTH * 0.5) - w)
+                # Y position: bottom half of chunk
+                world_y = chunk_top + CHUNK_HEIGHT * 0.5 + random.randint(0, int(CHUNK_HEIGHT * 0.5) - h)
+                
+                # Allow 50% overlap beyond chunk bounds
+                world_x = max(chunk_left - w//2, min(world_x, chunk_right + w//2 - w))
+                world_y = max(chunk_top - h//2, min(world_y, chunk_bottom + h//2 - h))
+                
+                # Check for collision
+                move_range = (world_x - move_span, world_x + move_span)
+                if has_platform_collision(world_x, world_y, w, h, moving, move_range, existing_platform_data, []):
+                    continue
+                
+                add_platform(
+                    world_x,
+                    world_y,
+                    w,
+                    h,
+                    moving=moving,
+                    move_range=move_range,
+                    speed=base_speed,
+                    surface_type=surface_type,
+                )
+                existing_platform_data.append({
+                    'x': world_x,
+                    'y': world_y,
+                    'w': w,
+                    'h': h,
+                    'moving': moving,
+                    'move_range': move_range
+                })
 
-
-def gen_platforms_for_range(platforms, existing_xs, start_x, end_x, player_x, level_length):
-    CHUNK_W = CHUNK_WIDTH
-    PLATFORMS_PER_CHUNK_VAL = PLATFORMS_PER_CHUNK
-    
-    cx_start = start_x // CHUNK_W
-    cx_end = end_x // CHUNK_W
-    
-    for cx in range(cx_start, cx_end + 1):
-        if cx in existing_xs:
-            continue
-        existing_xs.add(cx)
-        
-        base_x = cx * CHUNK_W + 200
-        # Find the highest platform in existing platforms to ensure connectivity
-        max_existing_y = HEIGHT - 140
-        for p in platforms:
-            if cx * CHUNK_W <= p.rect.centerx <= (cx + 1) * CHUNK_W + 100:
-                max_existing_y = min(max_existing_y, p.rect.top)
-        
-        last_y = max_existing_y
-        max_jump_height = abs(PLAYER_JUMP_SPEED) ** 2 / (2 * GRAVITY)
-        
-        # Scale difficulty based on player progress
-        progress = min(1.0, player_x / max(1, level_length))
-        
-        attempts = 0
-        platforms_created = 0
-        max_attempts = PLATFORMS_PER_CHUNK_VAL * 5
-        
-        # Keep trying until we create enough platforms or run out of attempts
-        while platforms_created < PLATFORMS_PER_CHUNK_VAL and attempts < max_attempts:
-            attempts += 1
-            
-            w = random.randint(80 - int(20 * progress), 180 - int(40 * progress))
-            h = 16
-            x = base_x + random.randint(-200, CHUNK_W - 50)
-            # Ensure platform is reachable from last platform
-            y = random.randint(
-                max(120, last_y - int(max_jump_height)), 
-                min(HEIGHT - 140, last_y + int(1.5 * max_jump_height))
-            )
-            
-            new_rect = pygame.Rect(x, y, w, h)
-            overlap = False
-            buffer = PLATFORM_BUFFER
-            
-            for p in platforms:
-                buffered_rect = p.rect.inflate(buffer, buffer)
-                if new_rect.colliderect(buffered_rect):
-                    overlap = True
-                    break
-            
-            if not overlap:
-                last_y = y
-                platforms_created += 1
-
-                if random.random() < 0.15:
-                    move_min = max(x - 80, cx * CHUNK_W)
-                    move_max = min(x + 120, (cx + 1) * CHUNK_W + 100)
-                    speed = random.randint(1, 3 + int(2 * progress))
-                    p = Platform(x, y, w, h, moving=True, move_range=(move_min, move_max), speed=speed)
-                else:
-                    p = Platform(x, y, w, h)
-                platforms.add(p)
 
 def build_fixed_level(level_index):
     platforms = pygame.sprite.Group()
     checkpoints = pygame.sprite.Group()
     enemies = pygame.sprite.Group()
+    orbs = pygame.sprite.Group()
     boosts = pygame.sprite.Group()
-    ground_y = HEIGHT - 40
     portal = Portal(PORTAL_X, PORTAL_PLATFORM_Y)
     level_length = grid_level_length()
 
     add_platform = make_add_platform(platforms, level_index)
-    add_platform(PORTAL_X - 60, PORTAL_PLATFORM_Y, 120, 18)
+    # Portal platform should always be normal (not slippery)
+    portal_platform = add_platform(PORTAL_X - 60, PORTAL_PLATFORM_Y, 120, 18, surface_type="normal")
 
     surface_type = "slippery" if level_index == 4 else "normal"
-    grid_platforms = add_grid_platforms(level_index, add_platform, surface_type=surface_type)
+    # Generate grid platforms, checking collision with portal platform
+    grid_platforms = add_grid_platforms(level_index, add_platform, surface_type=surface_type, existing_platforms=platforms)
     
     # Place end platform and flag at chunk with highest X coordinate
     layout = get_level_layout(level_index)
@@ -853,12 +1084,45 @@ def build_fixed_level(level_index):
     flag_gx, flag_gy = max_x_coord
     flag_x = GRID_ORIGIN_X + (flag_gx - 1) * CHUNK_WIDTH + CHUNK_WIDTH // 2
     flag_y = GRID_ORIGIN_Y - flag_gy * CHUNK_HEIGHT + 50
-    end_platform = add_platform(flag_x - 100, flag_y, 200, 18, surface_type=surface_type)
+    
+    # Check for collision before adding flag platform
+    flag_platform_x = flag_x - 100
+    flag_platform_y = flag_y
+    flag_platform_w = 200
+    flag_platform_h = 18
+    collision = False
+    for p in platforms:
+        if check_platform_collision(
+            flag_platform_x, flag_platform_y, flag_platform_w, flag_platform_h, False, None,
+            p.rect.x, p.rect.y, p.rect.width, p.rect.height,
+            p.moving, p.move_range
+        ):
+            collision = True
+            # Adjust position upward to avoid collision
+            flag_platform_y -= 100
+            break
+    
+    # Flag platform should always be normal (not slippery) for better control
+    end_platform = add_platform(flag_platform_x, flag_platform_y, flag_platform_w, flag_platform_h, surface_type="normal")
 
     if level_index == 3:
-        enemy_platforms = [p for p in grid_platforms if p.rect.width >= p.rect.height]
+        # Only spawn enemies on stationary horizontal platforms
+        enemy_platforms = [p for p in grid_platforms if p.rect.width >= p.rect.height and not p.moving]
         for p in enemy_platforms[1::3][:5]:
             enemies.add(Enemy(p, speed=2))
+        
+        # Spawn 2 orbs per chunk in the enemy level
+        layout = get_level_layout(level_index)
+        for gx, gy in layout:
+            # Calculate chunk center
+            chunk_left = GRID_ORIGIN_X + (gx - 1) * CHUNK_WIDTH
+            chunk_top = GRID_ORIGIN_Y - gy * CHUNK_HEIGHT
+            chunk_center_x = chunk_left + CHUNK_WIDTH // 2
+            chunk_center_y = chunk_top + CHUNK_HEIGHT // 2
+            
+            # Spawn 2 orbs per chunk with different radii and speeds
+            orbs.add(Orb(chunk_center_x, chunk_center_y, radius=100, speed=0.025))
+            orbs.add(Orb(chunk_center_x, chunk_center_y, radius=150, speed=-0.018))
 
     if level_index == 5:
         candidates = [p for p in grid_platforms if p.rect.width >= 140]
@@ -871,13 +1135,31 @@ def build_fixed_level(level_index):
         if i > 0 and i % 3 == 0:  # Every 3rd platform
             world_x = GRID_ORIGIN_X + (gx - 1) * CHUNK_WIDTH
             world_y = GRID_ORIGIN_Y - (gy - 1) * CHUNK_HEIGHT
-            # Add platform underneath checkpoint
-            add_platform(world_x - 60, world_y, 120, 18)
-            checkpoints.add(Checkpoint(world_x, world_y))
+            
+            # Check for collision before adding checkpoint platform
+            checkpoint_x = world_x - 60
+            checkpoint_y = world_y
+            checkpoint_w = 120
+            checkpoint_h = 18
+            collision = False
+            for p in platforms:
+                if check_platform_collision(
+                    checkpoint_x, checkpoint_y, checkpoint_w, checkpoint_h, False, None,
+                    p.rect.x, p.rect.y, p.rect.width, p.rect.height,
+                    p.moving, p.move_range
+                ):
+                    collision = True
+                    # Adjust position upward to avoid collision
+                    checkpoint_y -= 100
+                    break
+            
+            # Add platform underneath checkpoint - always normal (not slippery)
+            add_platform(checkpoint_x, checkpoint_y, checkpoint_w, checkpoint_h, surface_type="normal")
+            checkpoints.add(Checkpoint(world_x, checkpoint_y))
 
     flag = Flag(flag_x, end_platform.rect.top)
     generated_grid_coords = set(layout)
-    return platforms, checkpoints, portal, flag, enemies, boosts, level_length, generated_grid_coords
+    return platforms, checkpoints, portal, flag, enemies, orbs, boosts, level_length, generated_grid_coords
 
 # ---- Menu Rendering ----
 def draw_main_menu(screen, menu_selected, pulse_amount):
@@ -944,6 +1226,7 @@ def main():
     pulse_timer = 0
     platforms, checkpoints, portal, flag, generated_chunks = initial_platforms()
     enemies = pygame.sprite.Group()
+    orbs = pygame.sprite.Group()
     boosts = pygame.sprite.Group()
     use_procedural = True
     level_length = grid_level_length()
@@ -958,11 +1241,11 @@ def main():
     won = False
 
     def load_level(new_level_index, spawn_at_checkpoint=False):
-        nonlocal level_index, platforms, checkpoints, portal, enemies, boosts, generated_chunks, player, flag
+        nonlocal level_index, platforms, checkpoints, portal, enemies, orbs, boosts, generated_chunks, player, flag
         nonlocal last_checkpoint, camera_x, camera_y, start_time, won, use_procedural, level_length
 
         level_index = new_level_index
-        platforms, checkpoints, portal, flag, enemies, boosts, level_length, generated_chunks = build_fixed_level(level_index)
+        platforms, checkpoints, portal, flag, enemies, orbs, boosts, level_length, generated_chunks = build_fixed_level(level_index)
         use_procedural = True
         start_pos = (PORTAL_X, PORTAL_PLATFORM_Y - 24)
 
@@ -979,11 +1262,6 @@ def main():
             camera_y = max(0, player.rect.centery - HEIGHT // 2)
         start_time = pygame.time.get_ticks()
         won = False
-
-    def ensure_portal_platform():
-        portal_platform = pygame.Rect(PORTAL_X - 60, PORTAL_PLATFORM_Y, 120, 18)
-        if not any(p.rect.colliderect(portal_platform) for p in platforms):
-            platforms.add(Platform(PORTAL_X - 60, PORTAL_PLATFORM_Y, 120, 18))
 
     def reset(to_checkpoint=True):
         nonlocal player, platforms, flag
@@ -1080,12 +1358,17 @@ def main():
                 p.update(camera_x)
                 if use_procedural:
                     # Remove platforms outside the viewport (considering both X and Y)
-                    if (p.rect.right < camera_x - GEN_BUFFER or 
-                        p.rect.top > camera_y + HEIGHT + GEN_BUFFER) and p.rect.height != 40:
+                    # Account for platforms that may extend beyond chunk boundaries (50% overlap)
+                    removal_buffer = GEN_BUFFER + 100  # Extra buffer for overlapping platforms
+                    if (p.rect.right < camera_x - removal_buffer or 
+                        p.rect.top > camera_y + HEIGHT + removal_buffer) and p.rect.height != 40:
                         platforms.remove(p)
 
             for e in enemies:
                 e.update()
+
+            for o in orbs:
+                o.update()
 
             for b in boosts:
                 b.update()
@@ -1112,6 +1395,9 @@ def main():
             if pygame.sprite.spritecollide(player, enemies, False):
                 player, platforms, flag = reset(to_checkpoint=True)
 
+            if pygame.sprite.spritecollide(player, orbs, False):
+                player, platforms, flag = reset(to_checkpoint=True)
+
             if player.rect.top > HEIGHT + 300 and player.vy > 0:
                 print(f"Reset triggered: y={player.rect.y}, vy={player.vy}, on_ground={player.on_ground}")
                 player, platforms, flag = reset(to_checkpoint=True)
@@ -1129,6 +1415,8 @@ def main():
             screen.blit(flag.image, (flag.rect.x - camera_x, flag.rect.y - camera_y))
             for e in enemies:
                 screen.blit(e.image, (e.rect.x - camera_x, e.rect.y - camera_y))
+            for o in orbs:
+                screen.blit(o.image, (o.rect.x - camera_x, o.rect.y - camera_y))
             for b in boosts:
                 screen.blit(b.image, (b.rect.x - camera_x, b.rect.y - camera_y))
             for p in particles:
