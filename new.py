@@ -8,7 +8,7 @@ import random
 import math
 
 # ---- Config ----
-WIDTH, HEIGHT = 1600, 1000
+WIDTH, HEIGHT = 1000, 600
 FPS = 60
 GRAVITY = 0.8
 PLAYER_SPEED = 4.5
@@ -929,36 +929,61 @@ def gen_platforms_grid_aware(platforms, generated_chunks, camera_x, camera_y, le
                 'move_range': p.move_range
             })
         
-        # Generate multiple platforms per chunk
-        chunk_center_y = (chunk_top + chunk_bottom) / 2
-        for j in range(PLATFORMS_PER_CHUNK):
+        # Balanced per-quadrant generation (max diff of 2 between quadrants)
+        top_right_count = 12
+        bottom_left_count = 10 if gx > 1 else 0
+        total_target = PLATFORMS_PER_CHUNK + top_right_count + bottom_left_count
+        base_target = total_target // 4
+        remainder = total_target % 4
+        target_counts = [base_target] * 4
+        for q_index in random.sample(range(4), remainder):
+            target_counts[q_index] += 1
+
+        quad_counts = [0, 0, 0, 0]
+        max_diff = 2
+
+        mid_x = (chunk_left + chunk_right) // 2
+        mid_y = (chunk_top + chunk_bottom) // 2
+        quadrants = [
+            (chunk_left, mid_x, chunk_top, mid_y),
+            (mid_x, chunk_right, chunk_top, mid_y),
+            (chunk_left, mid_x, mid_y, chunk_bottom),
+            (mid_x, chunk_right, mid_y, chunk_bottom),
+        ]
+
+        attempts = 0
+        max_attempts = total_target * 10
+
+        def try_spawn_in_quadrant(quad_index, slot_index):
+            left, right, top, bottom = quadrants[quad_index]
+
             if is_vertical:
                 w, h = 18, 160
                 moving = False
-                # For vertical platforms, distribute across chunk with more variation
-                world_x = chunk_left + random.randint(int(PLATFORM_BUFFER * 0.3), CHUNK_WIDTH - int(PLATFORM_BUFFER * 0.7) - w)
-                # Use full chunk height with random distribution
-                world_y = chunk_top + random.randint(h, CHUNK_HEIGHT - h)
+                min_x = left + int(PLATFORM_BUFFER * 0.3)
+                max_x = right - int(PLATFORM_BUFFER * 0.7) - w
+                min_y = top + h
+                max_y = bottom - h
+                if min_x > max_x or min_y > max_y:
+                    return False
+                world_x = random.randint(min_x, max_x)
+                world_y = random.randint(min_y, max_y)
             else:
                 w, h = 160, 18
-                moving = level_index == 1 or (gx + j) % 3 == 0
-                # Gradient distribution: cluster around middle with diminishing density toward edges
-                # Use Gaussian distribution for Y position (cluster around center)
-                offset_from_center = random.gauss(0, CHUNK_HEIGHT * 0.25)
-                world_y = chunk_center_y + offset_from_center
-                # X position: distribute horizontally with variation
-                x_base = chunk_left + (j * (CHUNK_WIDTH // PLATFORMS_PER_CHUNK))
-                world_x = x_base + random.randint(-50, 50)
-            
-            # Allow 50% overlap beyond chunk bounds
-            world_x = max(chunk_left - w//2, min(world_x, chunk_right + w//2 - w))
-            world_y = max(chunk_top - h//2, min(world_y, chunk_bottom + h//2 - h))
-            
-            # Check for collision with existing platforms
+                moving = level_index == 1 or (gx + slot_index) % 3 == 0
+                quad_center_y = (top + bottom) / 2
+                offset_from_center = random.gauss(0, (bottom - top) * 0.25)
+                world_y = quad_center_y + offset_from_center
+                world_x = random.randint(left, right - w)
+                world_x += random.randint(-50, 50)
+
+            world_x = max(chunk_left - w // 2, min(world_x, chunk_right + w // 2 - w))
+            world_y = max(chunk_top - h // 2, min(world_y, chunk_bottom + h // 2 - h))
+
             move_range = (world_x - move_span, world_x + move_span)
             if has_platform_collision(world_x, world_y, w, h, moving, move_range, existing_platform_data, []):
-                continue
-            # Randomize speed and direction for moving platforms
+                return False
+
             random_speed = random.uniform(1.0, 3.5) if moving else base_speed
             random_direction = random.choice([-1, 1]) if moving else 1
             add_platform(
@@ -980,85 +1005,31 @@ def gen_platforms_grid_aware(platforms, generated_chunks, camera_x, camera_y, le
                 'moving': moving,
                 'move_range': move_range
             })
-        
-        # Add extra platforms in top-right quarter for easier climbing
-        # Top-right quarter: right half horizontally, top half vertically
-        top_right_count = 12
-        for k in range(top_right_count):
-            w, h = 140, 18
-            moving = False
-            # X position: right half of chunk
-            world_x = chunk_left + CHUNK_WIDTH * 0.5 + random.randint(0, int(CHUNK_WIDTH * 0.5) - w)
-            # Y position: top half of chunk
-            world_y = chunk_top + random.randint(20, int(CHUNK_HEIGHT * 0.5))
-            
-            # Allow 50% overlap beyond chunk bounds
-            world_x = max(chunk_left - w//2, min(world_x, chunk_right + w//2 - w))
-            world_y = max(chunk_top - h//2, min(world_y, chunk_bottom + h//2 - h))
-            
-            # Check for collision
-            move_range = (world_x - move_span, world_x + move_span)
-            if has_platform_collision(world_x, world_y, w, h, moving, move_range, existing_platform_data, []):
-                continue
-            
-            add_platform(
-                world_x,
-                world_y,
-                w,
-                h,
-                moving=moving,
-                move_range=move_range,
-                speed=base_speed,
-                surface_type=surface_type,
-            )
-            existing_platform_data.append({
-                'x': world_x,
-                'y': world_y,
-                'w': w,
-                'h': h,
-                'moving': moving,
-                'move_range': move_range
-            })
-        
-        # Add extra platforms in bottom-left quarter for chunks after the first
-        # Bottom-left quarter: left half horizontally, bottom half vertically
-        if gx > 1:  # Skip first chunk (gx=1)
-            bottom_left_count = 10
-            for k in range(bottom_left_count):
-                w, h = 140, 18
-                moving = False
-                # X position: left half of chunk
-                world_x = chunk_left + random.randint(0, int(CHUNK_WIDTH * 0.5) - w)
-                # Y position: bottom half of chunk
-                world_y = chunk_top + CHUNK_HEIGHT * 0.5 + random.randint(0, int(CHUNK_HEIGHT * 0.5) - h)
-                
-                # Allow 50% overlap beyond chunk bounds
-                world_x = max(chunk_left - w//2, min(world_x, chunk_right + w//2 - w))
-                world_y = max(chunk_top - h//2, min(world_y, chunk_bottom + h//2 - h))
-                
-                # Check for collision
-                move_range = (world_x - move_span, world_x + move_span)
-                if has_platform_collision(world_x, world_y, w, h, moving, move_range, existing_platform_data, []):
-                    continue
-                
-                add_platform(
-                    world_x,
-                    world_y,
-                    w,
-                    h,
-                    moving=moving,
-                    move_range=move_range,
-                    speed=base_speed,
-                    surface_type=surface_type,
-                )
-                existing_platform_data.append({
-                    'x': world_x,
-                    'y': world_y,
-                    'w': w,
-                    'h': h,
-                    'moving': moving,
-                    'move_range': move_range
-                })
+            quad_counts[quad_index] += 1
+            return True
+
+        # Pass 1: Fill targets per quadrant
+        while sum(quad_counts) < total_target and attempts < max_attempts:
+            underfilled = [i for i in range(4) if quad_counts[i] < target_counts[i]]
+            if not underfilled:
+                break
+            min_count = min(quad_counts[i] for i in underfilled)
+            candidates = [i for i in underfilled if quad_counts[i] == min_count]
+            quad_index = random.choice(candidates)
+            slot_index = sum(quad_counts)
+            attempts += 1
+            try_spawn_in_quadrant(quad_index, slot_index)
+
+        # Pass 2: Fallback to reach total while keeping spread within max_diff
+        while sum(quad_counts) < total_target and attempts < max_attempts * 2:
+            min_count = min(quad_counts)
+            allowed = [i for i, count in enumerate(quad_counts) if count <= min_count + max_diff - 1]
+            if not allowed:
+                break
+            quad_index = random.choice(allowed)
+            slot_index = sum(quad_counts)
+            attempts += 1
+            try_spawn_in_quadrant(quad_index, slot_index)
 
 
 def build_fixed_level(level_index):
