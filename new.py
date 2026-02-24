@@ -6,6 +6,7 @@ import pygame
 import sys
 import random
 import math
+import ctypes
 
 # ---- Config ----
 WIDTH, HEIGHT = 1000, 600
@@ -29,6 +30,77 @@ SLIP_MEDIUM_MS = 400
 SLIP_LONG_MS = 700
 GEM_SPAWN_CHANCE = 0.02
 GEM_BOTTOM_HALF_MULTIPLIER = 2.0
+
+THEORETICAL_NORMAL_JUMP_HEIGHT = (abs(PLAYER_JUMP_SPEED) ** 2) / (2 * GRAVITY)
+THEORETICAL_BOOST_JUMP_HEIGHT = (abs(PLAYER_JUMP_SPEED * BOOST_JUMP_MULT) ** 2) / (2 * GRAVITY)
+PLAYER_REACH_TRACKER = {
+    "max_speed": PLAYER_SPEED,
+    "max_jump_height_normal": THEORETICAL_NORMAL_JUMP_HEIGHT,
+    "max_jump_height_boost": THEORETICAL_BOOST_JUMP_HEIGHT,
+}
+
+
+def record_player_reach_metrics(horizontal_speed=None, jump_height=None, boost_used=False):
+    if horizontal_speed is not None:
+        PLAYER_REACH_TRACKER["max_speed"] = max(PLAYER_REACH_TRACKER["max_speed"], abs(horizontal_speed))
+
+    if jump_height is not None and jump_height > 0:
+        if boost_used:
+            PLAYER_REACH_TRACKER["max_jump_height_boost"] = max(
+                PLAYER_REACH_TRACKER["max_jump_height_boost"], jump_height
+            )
+        else:
+            PLAYER_REACH_TRACKER["max_jump_height_normal"] = max(
+                PLAYER_REACH_TRACKER["max_jump_height_normal"], jump_height
+            )
+
+
+def get_jump_profile(boost_enabled=False):
+    if boost_enabled:
+        jump_height = max(THEORETICAL_BOOST_JUMP_HEIGHT, PLAYER_REACH_TRACKER["max_jump_height_boost"])
+    else:
+        jump_height = max(THEORETICAL_NORMAL_JUMP_HEIGHT, PLAYER_REACH_TRACKER["max_jump_height_normal"])
+
+    jump_speed = -math.sqrt(max(0.01, 2 * GRAVITY * jump_height))
+    horizontal_speed = max(PLAYER_SPEED, PLAYER_REACH_TRACKER["max_speed"])
+    return {
+        "jump_height": jump_height,
+        "jump_speed": jump_speed,
+        "horizontal_speed": horizontal_speed,
+    }
+
+
+def get_chunk_safety_factor(gx, gy, salt=0):
+    seed = ((gx * 73856093) ^ (gy * 19349663) ^ (salt * 83492791)) & 0xFFFFFFFF
+    rng = random.Random(seed)
+    return 0.8 + (0.2 * rng.random())
+
+
+GENERATION_DEBUG_STATS = {
+    "chunks_generated": 0,
+    "platforms_generated": 0,
+    "attempts_total": 0,
+    "reject_collision": 0,
+    "reject_unreachable": 0,
+    "seam_fixes_attempted": 0,
+    "seam_fixes_succeeded": 0,
+    "seam_failures": 0,
+    "last_safety_factor": 1.0,
+    "last_chunk": (0, 0),
+}
+
+
+def reset_generation_debug_stats():
+    GENERATION_DEBUG_STATS["chunks_generated"] = 0
+    GENERATION_DEBUG_STATS["platforms_generated"] = 0
+    GENERATION_DEBUG_STATS["attempts_total"] = 0
+    GENERATION_DEBUG_STATS["reject_collision"] = 0
+    GENERATION_DEBUG_STATS["reject_unreachable"] = 0
+    GENERATION_DEBUG_STATS["seam_fixes_attempted"] = 0
+    GENERATION_DEBUG_STATS["seam_fixes_succeeded"] = 0
+    GENERATION_DEBUG_STATS["seam_failures"] = 0
+    GENERATION_DEBUG_STATS["last_safety_factor"] = 1.0
+    GENERATION_DEBUG_STATS["last_chunk"] = (0, 0)
 
 # Particle settings
 PARTICLE_SPAWN_COUNT = 5
@@ -65,8 +137,59 @@ CLOUD_SPACING = 220
 CLOUD_Y_OFFSET = 80
 CLOUD_Y_STEP = 20
 
+DISPLAY_MODE_FULLSCREEN = False
+
+
+def get_work_area_size():
+    if sys.platform.startswith("win"):
+        try:
+            class RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", ctypes.c_long),
+                    ("top", ctypes.c_long),
+                    ("right", ctypes.c_long),
+                    ("bottom", ctypes.c_long),
+                ]
+
+            rect = RECT()
+            SPI_GETWORKAREA = 0x0030
+            result = ctypes.windll.user32.SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                ctypes.byref(rect),
+                0,
+            )
+            if result:
+                work_w = rect.right - rect.left
+                work_h = rect.bottom - rect.top
+                if work_w > 0 and work_h > 0:
+                    return work_w, work_h
+        except Exception:
+            pass
+
+    display_info = pygame.display.Info()
+    return max(1, display_info.current_w), max(1, display_info.current_h)
+
+
+def set_display_mode(fullscreen=False):
+    global WIDTH, HEIGHT, screen, DISPLAY_MODE_FULLSCREEN
+
+    DISPLAY_MODE_FULLSCREEN = fullscreen
+    if fullscreen:
+        display_info = pygame.display.Info()
+        WIDTH = max(1, display_info.current_w)
+        HEIGHT = max(1, display_info.current_h)
+        screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN)
+    else:
+        WIDTH, HEIGHT = get_work_area_size()
+        screen = pygame.display.set_mode((WIDTH, HEIGHT))
+
+
+def toggle_display_mode():
+    set_display_mode(not DISPLAY_MODE_FULLSCREEN)
+
 pygame.init()
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
+set_display_mode(fullscreen=False)
 clock = pygame.time.Clock()
 font = pygame.font.SysFont("Arial", 20)
 big_font = pygame.font.SysFont("Arial", 56)
@@ -122,6 +245,7 @@ class Platform(pygame.sprite.Sprite):
                 self.slip_duration_ms = slip_duration_ms
         else:
             self.slip_duration_ms = 0
+        self.has_boost = False
 
     def update(self, camera_x):
         if self.moving:
@@ -309,6 +433,9 @@ class Chicken(pygame.sprite.Sprite):
         self.slip_timer_ms = 0
         self.slip_total_ms = 0
         self.slip_start_vx = 0
+        self.jump_start_y = None
+        self.jump_peak_y = None
+        self.jump_used_boost = False
         
     def update_physics(self, platforms, particles):
         prev_on_ground = self.on_ground
@@ -352,6 +479,13 @@ class Chicken(pygame.sprite.Sprite):
         self.rect.y = int(self.pos_y)
         self.collide_vertical(platforms, particles)
         self.vy += GRAVITY
+        record_player_reach_metrics(horizontal_speed=self.vx + platform_vx)
+
+        if not self.on_ground:
+            if self.jump_peak_y is None:
+                self.jump_peak_y = self.rect.top
+            else:
+                self.jump_peak_y = min(self.jump_peak_y, self.rect.top)
 
         # If we just landed on a moving platform, inherit its motion immediately
         if not prev_on_ground and self.on_ground and self.last_platform and self.last_platform.moving:
@@ -387,6 +521,12 @@ class Chicken(pygame.sprite.Sprite):
                 self.rect.bottom = p.rect.top
                 self.on_ground = True
                 self.last_platform = p  # Track the platform we landed on
+                if self.jump_start_y is not None and self.jump_peak_y is not None:
+                    jump_height = max(0, self.jump_start_y - self.jump_peak_y)
+                    record_player_reach_metrics(jump_height=jump_height, boost_used=self.jump_used_boost)
+                self.jump_start_y = None
+                self.jump_peak_y = None
+                self.jump_used_boost = False
                 if p.surface_type == "slippery":
                     self.slip_total_ms = p.slip_duration_ms
                     self.slip_timer_ms = p.slip_duration_ms
@@ -408,12 +548,16 @@ class Chicken(pygame.sprite.Sprite):
     def jump(self):
         if self.can_jump():
             jump_speed = PLAYER_JUMP_SPEED
+            used_boost = self.boost_jump_ready
             if self.boost_jump_ready:
                 jump_speed *= BOOST_JUMP_MULT
                 self.boost_jump_ready = False
             self.vy = jump_speed
             self.on_ground = False
             self.last_platform = None  # New: Clear platform on jump
+            self.jump_start_y = self.rect.top
+            self.jump_peak_y = self.rect.top
+            self.jump_used_boost = used_boost
             self.last_jump_time = pygame.time.get_ticks()
             self.jump_buffer = 0
             # Uncomment if you have a jump.wav file
@@ -664,8 +808,95 @@ def _platform_sprite_to_data(platform):
         'w': platform.rect.width,
         'h': platform.rect.height,
         'moving': platform.moving,
-        'move_range': platform.move_range
+        'move_range': platform.move_range,
+        'speed': platform.speed,
+        'has_boost': getattr(platform, 'has_boost', False),
     }
+
+
+def _platform_horizontal_gap(source_data, target_data):
+    source_left = source_data['x']
+    source_right = source_data['x'] + source_data['w']
+    target_left = target_data['x']
+    target_right = target_data['x'] + target_data['w']
+
+    if target_left > source_right:
+        return target_left - source_right
+    if source_left > target_right:
+        return source_left - target_right
+    return 0
+
+
+def _max_jump_gap_for_delta_y(delta_y, boost_enabled=False, source_data=None, safety_factor=1.0):
+    profile = get_jump_profile(boost_enabled=boost_enabled)
+    jump_height = profile['jump_height']
+    if delta_y < -jump_height:
+        return -1
+
+    jump_speed = profile['jump_speed']
+    discriminant = (jump_speed * jump_speed) + (2 * GRAVITY * delta_y)
+    if discriminant < 0:
+        return -1
+
+    air_time = (-jump_speed + math.sqrt(discriminant)) / GRAVITY
+    source_speed_bonus = 0
+    if source_data and source_data.get('moving'):
+        source_speed_bonus = abs(source_data.get('speed', 0))
+
+    horizontal_speed = profile['horizontal_speed'] + source_speed_bonus
+    return horizontal_speed * air_time * safety_factor
+
+
+def can_jump_between_platforms(source_data, target_data, safety_factor=1.0):
+    delta_y = target_data['y'] - source_data['y']
+    gap = _platform_horizontal_gap(source_data, target_data)
+
+    max_normal_gap = _max_jump_gap_for_delta_y(
+        delta_y,
+        boost_enabled=False,
+        source_data=source_data,
+        safety_factor=safety_factor,
+    )
+    if gap <= max_normal_gap:
+        return True
+
+    if source_data.get('has_boost'):
+        max_boost_gap = _max_jump_gap_for_delta_y(
+            delta_y,
+            boost_enabled=True,
+            source_data=source_data,
+            safety_factor=safety_factor,
+        )
+        return gap <= max_boost_gap
+
+    return False
+
+
+def has_reachable_connection(candidate_data, source_pool, safety_factor=1.0):
+    for source_data in source_pool:
+        if can_jump_between_platforms(source_data, candidate_data, safety_factor=safety_factor):
+            return True
+    return False
+
+
+def has_cross_chunk_connection(existing_dicts, placed_data, chunk_left, safety_factor=1.0):
+    seam_sources = [
+        pdata for pdata in existing_dicts
+        if (pdata['x'] + pdata['w']) >= (chunk_left - 220) and pdata['x'] < chunk_left
+    ]
+    seam_targets = [
+        pdata for pdata in placed_data
+        if pdata['x'] <= (chunk_left + 220)
+    ]
+
+    if not seam_sources or not seam_targets:
+        return True
+
+    for source_data in seam_sources:
+        for target_data in seam_targets:
+            if can_jump_between_platforms(source_data, target_data, safety_factor=safety_factor):
+                return True
+    return False
 
 def spawn_gems_for_chunk(chunk_platforms, gx, gy, gems):
     if gems is None:
@@ -688,7 +919,7 @@ def spawn_gems_for_chunk(chunk_platforms, gx, gy, gems):
     if spawned_count > 0:
         print(f"[GEM DEBUG] Chunk ({gx}, {gy}) spawned {spawned_count} gem(s)")
 
-def generate_chunk_platforms(level_index, gx, gy, add_platform, surface_type="normal", check_against_dicts=None, check_against_sprites=None, gems=None):
+def generate_chunk_platforms(level_index, gx, gy, add_platform, surface_type="normal", check_against_dicts=None, check_against_sprites=None, gems=None, boosts=None):
     """
     Generate platforms for one chunk using center/corner anchors, directional in-between
     generation, then random fill.
@@ -702,6 +933,10 @@ def generate_chunk_platforms(level_index, gx, gy, add_platform, surface_type="no
     chunk_left, chunk_right, chunk_top, chunk_bottom = get_chunk_boundaries(gx, gy)
     move_span = int(CHUNK_WIDTH * 0.2)
     base_speed = 1 if surface_type == "slippery" else 2
+    chunk_attempts = 0
+    chunk_reject_collision = 0
+    chunk_reject_unreachable = 0
+    last_safety_factor = 1.0
 
     existing_dicts = list(check_against_dicts) if check_against_dicts else []
     existing_sprites = list(check_against_sprites) if check_against_sprites else []
@@ -711,8 +946,23 @@ def generate_chunk_platforms(level_index, gx, gy, add_platform, surface_type="no
     def combined_dicts():
         return existing_dicts + placed_data
 
-    def try_add_platform(anchor_x, anchor_y, w, h, moving=False, mandatory=False, attempts=1, jitter=0):
+    def try_add_platform(
+        anchor_x,
+        anchor_y,
+        w,
+        h,
+        moving=False,
+        mandatory=False,
+        attempts=1,
+        jitter=0,
+        require_link=False,
+        link_pool=None,
+        safety_factor=1.0,
+        has_boost=False,
+    ):
+        nonlocal chunk_attempts, chunk_reject_collision, chunk_reject_unreachable, last_safety_factor
         for i in range(max(1, attempts)):
+            chunk_attempts += 1
             candidate_x = anchor_x
             candidate_y = anchor_y
             if i > 0 and jitter > 0:
@@ -726,9 +976,29 @@ def generate_chunk_platforms(level_index, gx, gy, add_platform, surface_type="no
 
             move_range = (world_x - move_span, world_x + move_span)
             if has_platform_collision(world_x, world_y, w, h, moving, move_range, combined_dicts(), existing_sprites):
+                chunk_reject_collision += 1
                 continue
 
             random_speed = random.uniform(1.0, 3.5) if moving else base_speed
+            candidate_data = {
+                'x': world_x,
+                'y': world_y,
+                'w': w,
+                'h': h,
+                'moving': moving,
+                'move_range': move_range,
+                'speed': random_speed,
+                'has_boost': has_boost and not moving,
+            }
+
+            if require_link:
+                sources = link_pool if link_pool is not None else combined_dicts()
+                if sources and not has_reachable_connection(candidate_data, sources, safety_factor=safety_factor):
+                    chunk_reject_unreachable += 1
+                    continue
+
+            last_safety_factor = safety_factor
+
             random_direction = random.choice([-1, 1]) if moving else 1
             p = add_platform(
                 world_x,
@@ -741,15 +1011,9 @@ def generate_chunk_platforms(level_index, gx, gy, add_platform, surface_type="no
                 surface_type=surface_type,
                 initial_direction=random_direction,
             )
+            p.has_boost = candidate_data['has_boost']
             placed.append(p)
-            placed_data.append({
-                'x': world_x,
-                'y': world_y,
-                'w': w,
-                'h': h,
-                'moving': moving,
-                'move_range': move_range
-            })
+            placed_data.append(candidate_data)
             return p
 
         if mandatory:
@@ -865,6 +1129,23 @@ def generate_chunk_platforms(level_index, gx, gy, add_platform, surface_type="no
                     ):
                         continue
 
+                    candidate_data = {
+                        'x': world_x,
+                        'y': world_y,
+                        'w': anchor_w,
+                        'h': anchor_h,
+                        'moving': False,
+                        'move_range': move_range,
+                        'speed': base_speed,
+                        'has_boost': False,
+                    }
+
+                    safety_factor = get_chunk_safety_factor(gx, gy, salt=len(placed_data) + _attempt)
+                    last_safety_factor = safety_factor
+                    if not has_reachable_connection(candidate_data, combined_dicts(), safety_factor=safety_factor):
+                        chunk_reject_unreachable += 1
+                        continue
+
                     p = add_platform(
                         world_x,
                         world_y,
@@ -877,14 +1158,7 @@ def generate_chunk_platforms(level_index, gx, gy, add_platform, surface_type="no
                         initial_direction=1,
                     )
                     placed.append(p)
-                    placed_data.append({
-                        'x': world_x,
-                        'y': world_y,
-                        'w': anchor_w,
-                        'h': anchor_h,
-                        'moving': False,
-                        'move_range': move_range
-                    })
+                    placed_data.append(candidate_data)
                     current_point = pygame.Vector2(p.rect.centerx, p.rect.centery)
                     placed_step = True
                     break
@@ -902,6 +1176,7 @@ def generate_chunk_platforms(level_index, gx, gy, add_platform, surface_type="no
         attempts += 1
         w, h = 160, 18
         moving = level_index == 1 or random.random() < 0.33
+        has_boost = (level_index == 5) and (not moving) and (random.random() < 0.08)
 
         candidate_x = random.randint(chunk_left, chunk_right - w)
         candidate_y = random.randint(chunk_top, chunk_bottom - h)
@@ -917,36 +1192,73 @@ def generate_chunk_platforms(level_index, gx, gy, add_platform, surface_type="no
         )
         move_range = (world_x - move_span, world_x + move_span)
 
-        if has_platform_collision(world_x, world_y, w, h, moving, move_range, combined_dicts(), existing_sprites):
-            continue
-
-        random_speed = random.uniform(1.0, 3.5) if moving else base_speed
-        random_direction = random.choice([-1, 1]) if moving else 1
-        p = add_platform(
+        safety_factor = get_chunk_safety_factor(gx, gy, salt=attempts)
+        p = try_add_platform(
             world_x,
             world_y,
             w,
             h,
             moving=moving,
-            move_range=move_range,
-            speed=random_speed,
-            surface_type=surface_type,
-            initial_direction=random_direction,
+            mandatory=False,
+            attempts=1,
+            jitter=0,
+            require_link=True,
+            link_pool=combined_dicts(),
+            safety_factor=safety_factor,
+            has_boost=has_boost,
         )
-        placed.append(p)
-        placed_data.append({
-            'x': world_x,
-            'y': world_y,
-            'w': w,
-            'h': h,
-            'moving': moving,
-            'move_range': move_range
-        })
+        if not p:
+            continue
+
+    seam_safety = get_chunk_safety_factor(gx, gy, salt=999)
+    last_safety_factor = seam_safety
+    if not has_cross_chunk_connection(existing_dicts, placed_data, chunk_left, safety_factor=seam_safety):
+        GENERATION_DEBUG_STATS["seam_fixes_attempted"] += 1
+        seam_sources = [
+            pdata for pdata in existing_dicts
+            if (pdata['x'] + pdata['w']) >= (chunk_left - 220) and pdata['x'] < chunk_left
+        ]
+        seam_sources.sort(key=lambda pdata: pdata['x'] + pdata['w'], reverse=True)
+        for source_data in seam_sources[:4]:
+            connector_x = chunk_left + random.randint(30, 150)
+            connector_y = source_data['y'] + random.randint(-160, 160)
+            connector = try_add_platform(
+                connector_x,
+                connector_y,
+                anchor_w,
+                anchor_h,
+                moving=False,
+                mandatory=False,
+                attempts=24,
+                jitter=90,
+                require_link=True,
+                link_pool=[source_data],
+                safety_factor=seam_safety,
+                has_boost=False,
+            )
+            if connector and has_cross_chunk_connection(existing_dicts, placed_data, chunk_left, safety_factor=seam_safety):
+                GENERATION_DEBUG_STATS["seam_fixes_succeeded"] += 1
+                break
+
+        if not has_cross_chunk_connection(existing_dicts, placed_data, chunk_left, safety_factor=seam_safety):
+            GENERATION_DEBUG_STATS["seam_failures"] += 1
 
     spawn_gems_for_chunk(placed, gx, gy, gems)
+    if boosts is not None:
+        for p in placed:
+            if getattr(p, 'has_boost', False):
+                boosts.add(JumpBoost(p))
+
+    GENERATION_DEBUG_STATS["chunks_generated"] += 1
+    GENERATION_DEBUG_STATS["platforms_generated"] += len(placed)
+    GENERATION_DEBUG_STATS["attempts_total"] += chunk_attempts
+    GENERATION_DEBUG_STATS["reject_collision"] += chunk_reject_collision
+    GENERATION_DEBUG_STATS["reject_unreachable"] += chunk_reject_unreachable
+    GENERATION_DEBUG_STATS["last_safety_factor"] = last_safety_factor
+    GENERATION_DEBUG_STATS["last_chunk"] = (gx, gy)
     return placed
 
-def add_grid_platforms(level_index, add_platform, surface_type="normal", existing_platforms=None, gems=None):
+def add_grid_platforms(level_index, add_platform, surface_type="normal", existing_platforms=None, gems=None, boosts=None):
     """
     Generate grid-based platforms for a level.
     
@@ -975,6 +1287,7 @@ def add_grid_platforms(level_index, add_platform, surface_type="normal", existin
             check_against_dicts=initial_check_list,
             check_against_sprites=placed,
             gems=gems,
+            boosts=boosts,
         )
         placed.extend(chunk_placed)
 
@@ -1053,7 +1366,7 @@ def initial_platforms():
     return platforms, checkpoints, portal, flag, gems, generated_grid_coords
 
 
-def gen_platforms_grid_aware(platforms, generated_chunks, camera_x, camera_y, level_index=0, gems=None):
+def gen_platforms_grid_aware(platforms, generated_chunks, camera_x, camera_y, level_index=0, gems=None, boosts=None):
     """
     Generate platforms based on grid coordinates, continuing the pattern from LEVEL_GRID_LAYOUTS.
     Generated_chunks now tracks (gx, gy) tuples instead of linear X indices.
@@ -1108,14 +1421,7 @@ def gen_platforms_grid_aware(platforms, generated_chunks, camera_x, camera_y, le
         # Store platform info as dict for advanced collision detection
         existing_platform_data = []
         for p in platforms:
-            existing_platform_data.append({
-                'x': p.rect.x,
-                'y': p.rect.y,
-                'w': p.rect.width,
-                'h': p.rect.height,
-                'moving': p.moving,
-                'move_range': p.move_range
-            })
+            existing_platform_data.append(_platform_sprite_to_data(p))
         
         generate_chunk_platforms(
             level_index,
@@ -1126,6 +1432,7 @@ def gen_platforms_grid_aware(platforms, generated_chunks, camera_x, camera_y, le
             check_against_dicts=existing_platform_data,
             check_against_sprites=[],
             gems=gems,
+            boosts=boosts,
         )
 
 
@@ -1145,7 +1452,7 @@ def build_fixed_level(level_index):
 
     surface_type = "slippery" if level_index == 4 else "normal"
     # Generate grid platforms, checking collision with portal platform
-    grid_platforms = add_grid_platforms(level_index, add_platform, surface_type=surface_type, existing_platforms=platforms, gems=gems)
+    grid_platforms = add_grid_platforms(level_index, add_platform, surface_type=surface_type, existing_platforms=platforms, gems=gems, boosts=boosts)
     
     # Place end platform and flag at chunk with highest X coordinate
     layout = get_level_layout(level_index)
@@ -1194,8 +1501,9 @@ def build_fixed_level(level_index):
             orbs.add(Orb(chunk_center_x, chunk_center_y, radius=150, speed=-0.018))
 
     if level_index == 5:
-        candidates = [p for p in grid_platforms if p.rect.width >= 140]
+        candidates = [p for p in grid_platforms if p.rect.width >= 140 and not p.has_boost]
         for p in candidates[:4]:
+            p.has_boost = True
             boosts.add(JumpBoost(p))
 
     # Add checkpoints at grid positions (every 3 grid cells)
@@ -1309,12 +1617,14 @@ def main():
     start_time = pygame.time.get_ticks()
     won = False
     gem_count = 0
+    show_generation_debug = False
 
     def load_level(new_level_index, spawn_at_checkpoint=False):
         nonlocal level_index, platforms, checkpoints, portal, enemies, orbs, boosts, gems, generated_chunks, player, flag
         nonlocal last_checkpoint, camera_x, camera_y, start_time, won, use_procedural, level_length
 
         level_index = new_level_index
+        reset_generation_debug_stats()
         platforms, checkpoints, portal, flag, enemies, orbs, boosts, gems, level_length, generated_chunks = build_fixed_level(level_index)
         use_procedural = True
         start_pos = (PORTAL_X, PORTAL_PLATFORM_Y - 24)
@@ -1389,6 +1699,10 @@ def main():
                     if event.key == pygame.K_F1:
                         developer_mode = not developer_mode
                         player.developer_mode = developer_mode
+                    elif event.key == pygame.K_F11:
+                        toggle_display_mode()
+                    elif event.key == pygame.K_F2:
+                        show_generation_debug = not show_generation_debug
                     elif event.key in (pygame.K_UP, pygame.K_SPACE):
                         if player.can_jump():
                             if boosts and player.on_ground:
@@ -1424,7 +1738,7 @@ def main():
 
             # Generate platforms using grid-aware system
             if use_procedural:
-                gen_platforms_grid_aware(platforms, generated_chunks, camera_x, camera_y, level_index, gems=gems)
+                gen_platforms_grid_aware(platforms, generated_chunks, camera_x, camera_y, level_index, gems=gems, boosts=boosts)
 
             for p in list(platforms):
                 p.update(camera_x)
@@ -1513,6 +1827,23 @@ def main():
             dev_text = "  DevMode" if developer_mode else ""
             info = font.render(f"{level_text}  Time {elapsed}s  Gems {gem_count}  Best {best_time if best_time != float('inf') else '-'}s  X {player.rect.centerx}{dev_text}  Press R to restart  Esc to quit", True, (30, 30, 30))
             screen.blit(info, (14, 14))
+            if show_generation_debug:
+                dbg = GENERATION_DEBUG_STATS
+                attempts = max(1, dbg["attempts_total"])
+                collision_pct = (dbg["reject_collision"] / attempts) * 100
+                unreachable_pct = (dbg["reject_unreachable"] / attempts) * 100
+                seam_attempts = max(1, dbg["seam_fixes_attempted"])
+                seam_success_pct = (dbg["seam_fixes_succeeded"] / seam_attempts) * 100
+                chunk_label = dbg["last_chunk"]
+                debug_lines = [
+                    f"GEN DEBUG [F2] chunk={chunk_label} safety={dbg['last_safety_factor']:.2f}",
+                    f"chunks={dbg['chunks_generated']} platforms={dbg['platforms_generated']} attempts={dbg['attempts_total']}",
+                    f"reject collision={dbg['reject_collision']} ({collision_pct:.1f}%) unreachable={dbg['reject_unreachable']} ({unreachable_pct:.1f}%)",
+                    f"seam fixes={dbg['seam_fixes_succeeded']}/{dbg['seam_fixes_attempted']} ({seam_success_pct:.1f}%) failures={dbg['seam_failures']}",
+                ]
+                for i, line in enumerate(debug_lines):
+                    debug_surface = font.render(line, True, (20, 20, 20))
+                    screen.blit(debug_surface, (14, 40 + i * 20))
         elif game_state == WIN_MENU:
             elapsed = (pygame.time.get_ticks() - start_time) // 1000
             screen.fill(BG_COLOR)
